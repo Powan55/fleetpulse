@@ -1,0 +1,20 @@
+spring:
+  application.name: api
+  flyway.enabled: false
+  jackson.read.strict_duplicate_detection: true
+  datasource.hikari:
+    maximum-pool-size: 10
+server:
+  error.include-stacktrace: never
+management:
+  endpoints.web.exposure.include: health
+  endpoint.health:
+    probes.enabled: true
+    group.readiness.include: readinessState,db
+fp:
+  notify-channel: ${FP_NOTIFY_CHANNEL:fleetpulse_changes}
+  sse:
+    flush-interval: ${FP_SSE_FLUSH_INTERVAL:250ms}
+    heartbeat-interval: ${FP_SSE_HEARTBEAT_INTERVAL:15s}
+    retry: ${FP_SSE_RETRY:2000}
+    max-clients: 50
