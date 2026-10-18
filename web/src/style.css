@@ -1,0 +1,21 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; --off: #57606a; --rec: #0969da; }
+body { margin: 0; padding: 1rem; }
+header { display: flex; align-items: center; gap: 1rem; }
+h1 { margin: 0; font-size: 1.4rem; }
+.conn { margin: 0; padding: .15rem .6rem; border-radius: 1rem; border: 1px solid currentColor; font-size: .85rem; }
+.c-connected { color: var(--ok); }
+.c-connecting { color: var(--warn); }
+.c-disconnected { color: var(--bad); }
+.summary { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+.summary b { font-size: 1.2rem; }
+.filter { display: block; margin-bottom: .75rem; }
+.grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: .35rem; }
+.tile { display: flex; justify-content: space-between; gap: .4rem; padding: .3rem .5rem; border: 1px solid; border-left-width: .4rem; border-radius: .25rem; font-size: .8rem; }
+.st { font-weight: 600; }
+.s-HEALTHY { color: var(--ok); }
+.s-DEGRADED { color: var(--warn); }
+.s-FAILED { color: var(--bad); }
+.s-OFFLINE { color: var(--off); }
+.s-RECOVERING { color: var(--rec); }
+.tile .id { color: CanvasText; }
+:focus-visible { outline: 2px solid var(--rec); outline-offset: 2px; }
