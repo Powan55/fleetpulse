@@ -1,0 +1,76 @@
+openapi: 3.1.0
+info:
+  title: FleetPulse processor test hooks
+  version: 1.0.0
+  description: |
+    Test-only control to stall one Kafka partition, used to prove that the offline sweep's per-partition lag gate
+    stops devices on a stalled partition from being marked OFFLINE.
+    Off by default. The controller is registered only when FP_TEST_HOOKS_ENABLED=true (conditional bean, e.g.
+    @ConditionalOnProperty); when off the handlers do not exist at all, so every path is a plain 404 from the framework.
+    Enabling: the base docker-compose.yml hardcodes FP_TEST_HOOKS_ENABLED: "false" (no ${...} interpolation, a stray .env
+    cannot flip it). Only the test override file `scenarios/compose.test-hooks.yml` sets "true":
+    `docker compose -f docker-compose.yml -f scenarios/compose.test-hooks.yml up -d processor`.
+    When enabled: WARN log at startup, gauge `fleetpulse.processor.test_hooks.paused_partitions`.
+    Every paused partition auto-resumes after 300 s with a WARN log, so a crashed script cannot leave the sweep gate closed.
+    The processor port is never published (no host port in any compose file); only the compose network (scenario runner)
+    reaches http://processor:8080. nginx never proxies /test/. No auth (local-only stack).
+    POST requires a JSON body `{}` with Content-Type: application/json (415 otherwise), like every mutating endpoint.
+    Implementation: Spring Kafka MessageListenerContainer.pausePartition / resumePartition. The pause takes effect at the
+    next poll; the consumer stays in the group (only fetching for that partition stops), so its committed offset freezes
+    and lag grows. With 2 replicas a call only affects partitions owned by the replica that receives it; run the stall
+    scenario with 1 replica.
+servers:
+  - url: http://processor:8080
+paths:
+  /test/v1/partitions:
+    get:
+      operationId: listPartitions
+      summary: List partitions assigned to this replica with pause state.
+      responses:
+        '200':
+          description: Partitions assigned to this replica
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PartitionState' }
+        '404': { description: Hooks not registered (disabled) }
+  /test/v1/partitions/{partition}/pause:
+    post:
+      operationId: pausePartition
+      summary: Pause one partition. Auto-resumes after 300 s.
+      parameters:
+        - { name: partition, in: path, required: true, schema: { type: integer, minimum: 0, maximum: 5 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, additionalProperties: false, maxProperties: 0 } } }
+      responses:
+        '202': { description: Pause requested, content: { application/json: { schema: { $ref: '#/components/schemas/PartitionState' } } } }
+        '404': { description: Hooks not registered (disabled) }
+        '409': { description: Partition not assigned to this replica }
+        '415': { description: Missing JSON body }
+  /test/v1/partitions/{partition}/resume:
+    post:
+      operationId: resumePartition
+      summary: Resume a paused partition.
+      parameters:
+        - { name: partition, in: path, required: true, schema: { type: integer, minimum: 0, maximum: 5 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, additionalProperties: false, maxProperties: 0 } } }
+      responses:
+        '202': { description: Resume requested, content: { application/json: { schema: { $ref: '#/components/schemas/PartitionState' } } } }
+        '404': { description: Hooks not registered (disabled) }
+        '409': { description: Partition not assigned to this replica }
+        '415': { description: Missing JSON body }
+components:
+  schemas:
+    PartitionState:
+      type: object
+      required: [topic, partition, pauseRequested, paused]
+      properties:
+        topic: { type: string }
+        partition: { type: integer }
+        pauseRequested: { type: boolean }
+        paused: { type: boolean }
+        autoResumeAt: { type: [string, 'null'], format: date-time, description: 'Set while paused (pause time + 300 s).' }

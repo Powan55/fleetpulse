@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetpulse.local/contracts/sse-events.schema.json",
+  "title": "FleetPulse SSE stream v1",
+  "description": "GET /api/v1/stream, Content-Type text/event-stream, HTTP/1.1. Each message: `event: <name>` + one `data:` line of JSON. Validate by event name, not against the root: the `data:` JSON of event `hello` -> $defs/hello, `devices` -> $defs/devices, `alerts` -> $defs/alerts, `fleet.summary` -> $defs/fleetSummary, `resync` -> $defs/resync (the root has no oneOf on purpose: devices and alerts share the `{items: [...]}` shape, so an empty batch would be ambiguous). The server never sends an empty `items` array. No `id:` field; Last-Event-ID is ignored. Server sends `retry: 2000` once at connect, a comment line `: hb` every 15 s, and flushes coalesced changes at most every 250 ms (4 updates/s). Convergence rule for clients: (1) open stream, buffer messages; (2) on `hello` fetch snapshot: GET /api/v1/devices?size=1000, GET /api/v1/fleet/summary, GET /api/v1/alerts?status=OPEN,ACKED&size=200; (3) apply snapshot, then buffered + live messages, dropping any device with stateVersion <= known and any alert with version <= known; (4) on `resync` or any reconnect, repeat from (2). The stream is never guaranteed complete; the snapshot is. Latency: device `stateChangedAt` and alert `updatedAt` are the DB change times (state_transition.occurred_at / alert.updated_at); arrival time minus these approximates commit-to-browser latency. A newly created device (first event) is sent in `devices` with stateVersion 1.",
+  "$defs": {
+    "hello": {
+      "description": "event: hello. First message on every connection.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["serverInstance", "at"],
+      "properties": {
+        "serverInstance": { "type": "string", "description": "Random id per api process start." },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "devices": {
+      "description": "event: devices. Coalesced device changes (new device or state transition) since last flush, latest per device.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["deviceId", "state", "stateVersion", "stateChangedAt", "lastSeenAt"],
+            "properties": {
+              "deviceId": { "type": "string" },
+              "state": { "enum": ["HEALTHY", "DEGRADED", "FAILED", "OFFLINE", "RECOVERING"] },
+              "stateVersion": { "type": "integer", "minimum": 1 },
+              "stateChangedAt": { "type": "string", "format": "date-time", "description": "= state_transition.occurred_at of this transition (row creation time for stateVersion 1)." },
+              "lastSeenAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+    "alerts": {
+      "description": "event: alerts. Coalesced alert changes, latest per alert. Item shape = Alert in api.openapi.yaml (includes updatedAt).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["alertId", "deviceId", "ruleId", "status", "version", "backfilled", "openedAt", "updatedAt"]
+          }
+        }
+      }
+    },
+    "fleetSummary": {
+      "description": "event: fleet.summary. Full replacement, sent in any flush that carried a device change. Shape = FleetSummary in api.openapi.yaml.",
+      "type": "object",
+      "required": ["total", "byState", "asOf"]
+    },
+    "resync": {
+      "description": "event: resync. Server may have missed changes (notification listener reconnected). Client must re-snapshot.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": { "reason": { "enum": ["listener_reconnected", "overflow"] } }
+    }
+  }
+}

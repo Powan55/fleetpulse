@@ -1,0 +1,108 @@
+openapi: 3.1.0
+info:
+  title: FleetPulse mock webhook sink
+  version: 1.0.0
+  description: |
+    Test helper that stands in for a real webhook receiver; its own container, not a product service. No auth
+    (local-only stack). Compose network http://sink:8080; host port 127.0.0.1:8083 only with the `compose.debug.yml`
+    override file.
+    State is in memory: restarting the sink container loses records, so scenarios use mode.outage instead of stopping it.
+    Recording rule: a delivery is recorded (key + count) only when the sink answers 2xx. In delay mode the sink records,
+    sleeps delayMs, then answers 200, so a client timeout produces a recorded key plus a later duplicate with the same key.
+    Mutating control calls (PUT) require a JSON body with Content-Type: application/json (415 otherwise).
+servers:
+  - url: http://sink:8080
+paths:
+  /webhooks/alerts:
+    post:
+      operationId: receiveWebhook
+      summary: Receive one alert webhook (body = webhook.schema.json). Mode order - outage, then errorRate draw, then delay.
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './webhook.schema.json' }
+      responses:
+        '200': { description: Recorded }
+        '400': { description: Body fails schema or header != body.idempotencyKey. Not recorded. Sender dead-letters it (permanent). }
+        '503': { description: Injected failure (outage or errorRate draw). Not recorded. }
+  /api/v1/mode:
+    get:
+      operationId: getMode
+      summary: Current failure mode.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Mode' } } } }
+    put:
+      operationId: putMode
+      summary: Replace failure mode (omitted fields = healthy defaults).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Mode' } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/Mode' } } } }
+        '400': { description: Invalid }
+        '415': { description: Wrong content type }
+  /api/v1/deliveries/summary:
+    get:
+      operationId: getSummary
+      summary: Totals of recorded, unique, duplicate and rejected deliveries.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recorded, uniqueKeys, duplicates, rejectedInjected, rejectedInvalid]
+                properties:
+                  recorded: { type: integer, format: int64, description: '2xx deliveries incl. duplicates' }
+                  uniqueKeys: { type: integer, format: int64 }
+                  duplicates: { type: integer, format: int64, description: 'recorded - uniqueKeys' }
+                  rejectedInjected: { type: integer, format: int64 }
+                  rejectedInvalid: { type: integer, format: int64 }
+  /api/v1/deliveries/keys:
+    get:
+      operationId: listKeys
+      summary: Every recorded idempotency key with count, for comparing against the outbox after a run. Ordered by firstReceivedAt.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [key, count, firstReceivedAt, lastReceivedAt, alertId, alertVersion]
+                  properties:
+                    key: { type: string }
+                    count: { type: integer }
+                    firstReceivedAt: { type: string, format: date-time }
+                    lastReceivedAt: { type: string, format: date-time }
+                    alertId: { type: integer, format: int64 }
+                    alertVersion: { type: integer }
+  /api/v1/deliveries:
+    get:
+      operationId: listDeliveries
+      summary: Recorded payloads (debug), newest first.
+      parameters:
+        - { name: alertId, in: query, required: false, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: './webhook.schema.json' } } } } }
+    delete:
+      operationId: resetDeliveries
+      summary: Clear all records and counters (scenario start).
+      responses:
+        '204': { description: Cleared }
+components:
+  schemas:
+    Mode:
+      type: object
+      additionalProperties: false
+      properties:
+        outage: { type: boolean, default: false, description: 'Every request -> 503 immediately.' }
+        errorRate: { type: number, minimum: 0, maximum: 1, default: 0, description: 'P(503) per request.' }
+        delayMs: { type: integer, minimum: 0, maximum: 60000, default: 0, description: 'Sleep before 200 (sender timeout is 5 s).' }

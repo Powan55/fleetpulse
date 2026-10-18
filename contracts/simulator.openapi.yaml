@@ -1,0 +1,311 @@
+openapi: 3.1.0
+info:
+  title: FleetPulse simulator control + ledger
+  version: 1.0.0
+  description: |
+    No auth (local-only stack). Reachable on the compose network at http://simulator:8080 and from the UI chaos panel
+    same-origin at http://localhost:8080/sim/api/v1/... (nginx maps /sim/api/v1/ to /api/v1/). Host port 127.0.0.1:8082
+    only with the `compose.debug.yml` override file.
+    Mutating calls (POST/PUT) require a JSON body with Content-Type: application/json (415 otherwise). All inputs validated;
+    400 = problem+json (same Problem shape as api.openapi.yaml). Every change applies at runtime, no restart.
+
+    Behaviour the processor and the scenario scripts rely on (normative):
+    - Each device emits a heartbeat every SIM_HEARTBEAT_INTERVAL (2 s) and a telemetry sample every
+      SIM_TELEMETRY_INTERVAL (2 s), start phase uniform random in [0, interval) from the seed. 1000 devices = ~1000 ev/s.
+    - event_id = UUID v3 of "<seed>:<device_id>:<epoch>:<seq>" (java.util.UUID.nameUUIDFromBytes), assigned at generation,
+      stored with the event, reused for dups, resends and replay. Skew changes event_time only.
+    - epoch = SIM_EPOCH if set, else Unix ms at boot. seq restarts at 1 per epoch. Same seed + same epoch => same event_id
+      sequence per device, so runs are reproducible when SIM_EPOCH is pinned.
+    - Per device outbound queue (generated, not yet acked), capacity SIM_BUFFER_CAPACITY (default 400 events, enough for a
+      5-minute disconnect plus margin). Overflow drops the OLDEST unsent event and counts buffer_overflow. Disconnected
+      device: keeps generating into the queue, sends nothing. Kafka send failure: event stays/returns to queue head in seq
+      order, resent later with same event_id.
+    - Reconnect / Kafka back: queued events sent in seq order with replay=true, then live. Replay is round-robin across
+      devices (one event per device per turn) so every device gets its first replayed event within ~1 s (the processor's
+      offline sweep relies on this after a Kafka outage). Aggregate send rate (live + dups + replay) capped by
+      SIM_MAX_SEND_RATE (2000 ev/s, twice the live rate); replay uses the remainder, or chaos.replayMaxRate if lower.
+    - Ledger counts only Kafka-acked events (producer callback success), per device for the current epoch, unique by seq.
+      Dups, drops, overflow, malformed never enter the ledger.
+    - Producer: acks=all, enable.idempotence=true (Kafka defaults, set explicitly), compression.type=lz4, key=device_id.
+    - Telemetry from devices with an active fault is force-sampled for tracing (token bucket SIM_FORCED_TRACE_RATE, 50/s).
+servers:
+  - url: http://simulator:8080
+paths:
+  /api/v1/chaos:
+    get:
+      operationId: getChaos
+      summary: Current chaos settings.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Chaos' } } } }
+    put:
+      operationId: putChaos
+      summary: Replace all chaos settings (omitted fields reset to defaults = off).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Chaos' } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/Chaos' } } } }
+        '400': { description: Invalid }
+        '415': { description: Wrong content type }
+  /api/v1/chaos/malformed:
+    post:
+      operationId: injectMalformed
+      summary: Send malformed records to the telemetry topic (they must land in the dead-letter topic). Not in ledger. Counter kind=malformed_injected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [count, kind]
+              properties:
+                count: { type: integer, minimum: 1, maximum: 1000 }
+                kind: { enum: [invalid_json, missing_field, bad_type, oversize] }
+      responses:
+        '202': { description: Sent, content: { application/json: { schema: { type: object, properties: { sent: { type: integer } } } } } }
+        '400': { description: Invalid }
+  /api/v1/disconnects:
+    get:
+      operationId: listDisconnects
+      summary: Active disconnect windows.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Disconnect' } } } } }
+    post:
+      operationId: startDisconnect
+      summary: Disconnect target devices for durationMs; they buffer and replay on reconnect.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [target, durationMs]
+              properties:
+                target: { $ref: '#/components/schemas/Target' }
+                durationMs: { type: integer, minimum: 1000, maximum: 3600000 }
+      responses:
+        '202': { description: Started, content: { application/json: { schema: { $ref: '#/components/schemas/Disconnect' } } } }
+        '400': { description: Invalid }
+    delete:
+      operationId: reconnectAll
+      summary: End all disconnect windows now (replay starts).
+      responses:
+        '204': { description: Done }
+  /api/v1/faults:
+    get:
+      operationId: listFaults
+      summary: Active faults.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Fault' } } } } }
+    post:
+      operationId: injectFault
+      summary: >
+        Inject a fault. Sample values while faulty - temperature DEGRADED 75+-2 / FAILED 95+-2 C; battery DEGRADED 15+-2 /
+        FAILED 2+-1 %; errors DEGRADED 8+-2 / FAILED 30+-5 per sample. Healthy (OK) ranges - temperature 20-50,
+        battery 40-100, errors 0-1. Must stay consistent with the thresholds in rules.yaml. Body carries exactly one of
+        `level` or `pattern`; both or neither -> 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [target, metric]
+              properties:
+                target: { $ref: '#/components/schemas/Target' }
+                metric: { enum: [temperature, battery, errors] }
+                level: { enum: [DEGRADED, FAILED], description: 'Constant fault level. Exactly one of level or pattern; both or neither -> 400.' }
+                durationMs: { type: [integer, 'null'], minimum: 1000, maximum: 3600000, description: 'null = until DELETE' }
+                pattern:
+                  description: >
+                    Repeating sample pattern for flap tests, alternative to level (exactly one of the two).
+                    Steps are applied to consecutive telemetry samples of each target device, in order, then repeated.
+                    Examples - alternate [{DEGRADED,1},{OK,1}]; enter/exit boundary [{DEGRADED,3},{OK,5}]; escalation
+                    [{DEGRADED,3},{FAILED,3},{OK,5}]. Pattern position starts at the first telemetry sample after the call,
+                    per device.
+                  type: object
+                  additionalProperties: false
+                  required: [steps]
+                  properties:
+                    steps:
+                      type: array
+                      minItems: 1
+                      maxItems: 10
+                      items:
+                        type: object
+                        additionalProperties: false
+                        required: [level, samples]
+                        properties:
+                          level: { enum: [OK, DEGRADED, FAILED] }
+                          samples: { type: integer, minimum: 1, maximum: 100 }
+              oneOf:
+                - required: [level]
+                - required: [pattern]
+      responses:
+        '202': { description: Injected, content: { application/json: { schema: { $ref: '#/components/schemas/Fault' } } } }
+        '400': { description: Invalid (incl. both or neither of level/pattern) }
+    delete:
+      operationId: clearAllFaults
+      summary: Clear every active fault.
+      responses:
+        '204': { description: Cleared }
+  /api/v1/faults/{faultId}:
+    delete:
+      operationId: clearFault
+      summary: Clear one fault.
+      parameters:
+        - { name: faultId, in: path, required: true, schema: { type: string, maxLength: 64 } }
+      responses:
+        '204': { description: Cleared }
+        '404': { description: Unknown }
+  /api/v1/generation:
+    get:
+      operationId: getGeneration
+      summary: Whether event generation is paused.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Generation' } } } }
+    put:
+      operationId: putGeneration
+      summary: >
+        Pause/resume event generation fleet-wide (quiescence for reconciliation). On pause, responds after every queued
+        send is acked or failed (max 30 s). Paused devices go OFFLINE after the 10 s offline timeout; that is expected.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Generation' } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/Generation' } } } }
+  /api/v1/counters:
+    get:
+      operationId: getCounters
+      summary: Same numbers as metric fleetpulse.sim.events{kind} + gauges, since boot.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Counters' } } } }
+  /api/v1/ledger:
+    get:
+      operationId: getLedger
+      summary: Per device accepted counts for the current epoch.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [seed, epoch, asOf, totalAccepted, devices]
+                properties:
+                  seed: { type: integer, format: int64 }
+                  epoch: { type: integer, format: int64 }
+                  asOf: { type: string, format: date-time }
+                  totalAccepted: { type: integer, format: int64 }
+                  devices: { type: array, items: { $ref: '#/components/schemas/LedgerDevice' } }
+  /api/v1/ledger/devices/{deviceId}:
+    get:
+      operationId: getLedgerDevice
+      summary: Ledger for one device, incl. accepted seq ranges (reconciliation drill-down).
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string, pattern: '^dev-[0-9]{4,6}$' } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/LedgerDevice' }
+                  - type: object
+                    required: [acceptedSeqRanges]
+                    properties:
+                      acceptedSeqRanges:
+                        description: 'Inclusive [from, to] runs of accepted seq, ascending. event_id derivable per info.description.'
+                        type: array
+                        items: { type: array, items: { type: integer, format: int64 }, minItems: 2, maxItems: 2 }
+        '404': { description: Unknown device }
+components:
+  schemas:
+    Target:
+      description: Exactly one of deviceIds or fraction. fraction picks devices deterministically from the seed.
+      type: object
+      additionalProperties: false
+      properties:
+        deviceIds: { type: array, items: { type: string, pattern: '^dev-[0-9]{4,6}$' }, minItems: 1, maxItems: 1000 }
+        fraction: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      oneOf:
+        - required: [deviceIds]
+        - required: [fraction]
+    Chaos:
+      type: object
+      additionalProperties: false
+      properties:
+        duplicateRate: { type: number, minimum: 0, maximum: 1, default: 0, description: 'P(an accepted event is re-sent once more).' }
+        dropRate: { type: number, minimum: 0, maximum: 1, default: 0, description: 'P(a generated event is dropped before send). Device-side loss, counted.' }
+        reorderRate: { type: number, minimum: 0, maximum: 1, default: 0, description: 'P(an event is held back and sent after the next one of the same device). Produces late events.' }
+        skewSets:
+          description: >
+            Clock skew added to event_time only. Disjoint device sets chosen from the seed in list order, e.g.
+            [{fraction: 0.25, offsetMs: 300000}, {fraction: 0.25, offsetMs: -300000}] for +-5 min on half the fleet.
+            Sum of fractions <= 1. Empty = off.
+          type: array
+          default: []
+          maxItems: 4
+          items:
+            type: object
+            additionalProperties: false
+            required: [fraction, offsetMs]
+            properties:
+              fraction: { type: number, minimum: 0, maximum: 1 }
+              offsetMs: { type: integer, minimum: -3600000, maximum: 3600000 }
+        replayOnReconnect: { type: boolean, default: true, description: 'false = discard queue on reconnect (counted as buffer_overflow). Demo only.' }
+        replayMaxRate: { type: [integer, 'null'], minimum: 1, maximum: 2000, default: null, description: 'Aggregate replay ev/s cap; null = remainder of SIM_MAX_SEND_RATE.' }
+    Disconnect:
+      type: object
+      required: [disconnectId, devices, until]
+      properties:
+        disconnectId: { type: string }
+        devices: { type: integer }
+        until: { type: string, format: date-time }
+    Fault:
+      type: object
+      required: [faultId, metric, devices]
+      properties:
+        faultId: { type: string }
+        metric: { enum: [temperature, battery, errors] }
+        level: { type: [string, 'null'], enum: [DEGRADED, FAILED, null], description: 'null when the fault uses a pattern.' }
+        devices: { type: integer }
+        until: { type: [string, 'null'], format: date-time }
+        pattern: { type: [object, 'null'], description: 'null when the fault uses a constant level.' }
+    Generation:
+      type: object
+      additionalProperties: false
+      required: [paused]
+      properties:
+        paused: { type: boolean }
+    Counters:
+      type: object
+      required: [generated, accepted, sent, injectedDups, dropped, reordered, skewedEvents, replayed, bufferOverflow, sendFailed, malformedInjected, disconnectedDevices, bufferedEvents]
+      properties:
+        generated: { type: integer, format: int64 }
+        accepted: { type: integer, format: int64, description: 'Unique accepted (ledger total).' }
+        sent: { type: integer, format: int64 }
+        injectedDups: { type: integer, format: int64 }
+        dropped: { type: integer, format: int64 }
+        reordered: { type: integer, format: int64 }
+        skewedEvents: { type: integer, format: int64 }
+        replayed: { type: integer, format: int64 }
+        bufferOverflow: { type: integer, format: int64 }
+        sendFailed: { type: integer, format: int64 }
+        malformedInjected: { type: integer, format: int64 }
+        disconnectedDevices: { type: integer }
+        bufferedEvents: { type: integer, format: int64 }
+    LedgerDevice:
+      type: object
+      required: [deviceId, epoch, acceptedCount, maxAcceptedSeq, lastAckAt]
+      properties:
+        deviceId: { type: string }
+        epoch: { type: integer, format: int64 }
+        acceptedCount: { type: integer, format: int64 }
+        maxAcceptedSeq: { type: integer, format: int64, description: '0 if none.' }
+        lastAckAt: { type: [string, 'null'], format: date-time, description: 'Producer ack callback time of the latest accepted event; used to time offline detection.' }

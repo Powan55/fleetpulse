@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetpulse.local/contracts/envelope.schema.json",
+  "title": "FleetPulse telemetry envelope v1",
+  "description": "Kafka record value on topic fleetpulse.telemetry.v1. UTF-8 JSON, max 1024 bytes. Record key = device_id (UTF-8). Optional headers: traceparent, tracestate (W3C). Unknown top-level fields are rejected (dead-letter topic). The processor's validation must be at least as strict as every database constraint, so a record that passes can never fail an insert and block its partition: (1) JSON parsed with duplicate-key detection on; (2) every `pattern` is a full match (Java `matcher().matches()` or `\\A...\\z`; `$` alone accepts a trailing newline); (3) `format` keywords are enforced, not just annotations: `event_id` parses as a UUID, `event_time` parses as an RFC 3339 instant in [2000-01-01T00:00:00Z, 2100-01-01T00:00:00Z); (4) Kafka key bytes == device_id; (5) epoch <= record LogAppendTime + 24 h, so one forged record cannot push a device's epoch into the future and freeze it. Any failure goes to the dead-letter topic with a reason, never an exception.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "device_id", "epoch", "seq", "event_time", "type", "replay", "payload"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-3[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "Name-based UUID v3 = java.util.UUID.nameUUIDFromBytes(UTF-8 of \"<seed>:<device_id>:<epoch>:<seq>\"), lowercase. Assigned once at generation, reused on resend/dup/replay. The processor validates the format only, not the derivation."
+    },
+    "device_id": { "type": "string", "pattern": "^dev-[0-9]{4,6}$", "description": "Must equal the Kafka record key. Same pattern as the device.device_id CHECK." },
+    "epoch": {
+      "type": "integer", "minimum": 1, "maximum": 9007199254740991,
+      "description": "Simulator boot epoch (Unix ms at boot unless SIM_EPOCH is set). Ordering key is (epoch, seq). A new epoch is greater than the old one. Also bounded by LogAppendTime + 24 h (see top-level description)."
+    },
+    "seq": { "type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Strictly increasing per (device_id, epoch), starts at 1." },
+    "event_time": { "type": "string", "format": "date-time", "description": "Device clock, RFC 3339 UTC with ms, year 2000-2099. May be skewed on purpose (chaos). Display only; never used for ordering, liveness or hysteresis." },
+    "type": { "enum": ["heartbeat", "telemetry"] },
+    "replay": { "type": "boolean", "description": "true when sent from the device buffer after a disconnect or Kafka outage. Not part of event identity. Alerts opened from such a sample are flagged backfilled." },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "telemetry" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["temperature_c", "battery_pct", "error_count"],
+            "properties": {
+              "temperature_c": { "type": "number", "minimum": -100, "maximum": 200 },
+              "battery_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+              "error_count": { "type": "integer", "minimum": 0, "maximum": 1000000, "description": "Errors in this sample interval (not cumulative)." }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "heartbeat" } } },
+      "then": { "properties": { "payload": { "type": "object", "additionalProperties": false, "maxProperties": 0 } } }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": 1,
+      "event_id": "5d41402a-bc4b-3a76-b971-9d911017c592",
+      "device_id": "dev-0042",
+      "epoch": 1792130400000,
+      "seq": 1834,
+      "event_time": "2026-10-16T12:34:56.789Z",
+      "type": "telemetry",
+      "replay": false,
+      "payload": { "temperature_c": 41.5, "battery_pct": 87.0, "error_count": 0 }
+    }
+  ]
+}

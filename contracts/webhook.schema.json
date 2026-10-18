@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetpulse.local/contracts/webhook.schema.json",
+  "title": "FleetPulse alert webhook payload v1",
+  "description": "POST <FP_SINK_URL> (default http://sink:8080/webhooks/alerts). Headers: Content-Type: application/json, Idempotency-Key: <idempotencyKey>, traceparent (W3C, when the source span was sampled). At-least-once: receivers dedupe on idempotencyKey. Per alert, the sender delivers transitions in alertVersion order (next row not attempted until the previous one is DELIVERED or DEAD); receivers may also order by alertVersion. Response handling: 2xx = delivered; 408, 429, 5xx, timeout, connection error = retry with exponential backoff (1 s doubling to a 30 s cap, 20 attempts); any other 4xx = permanent, row goes DEAD at once (counted, kept).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "idempotencyKey", "alertId", "alertVersion", "transition", "status", "deviceId", "ruleId", "backfilled", "occurredAt", "openedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "idempotencyKey": { "type": "string", "pattern": "^alert-[0-9]+-(opened|acked|resolved)$", "description": "alert-<alertId>-<transition>. Stable across retries; each transition happens at most once per alert." },
+    "alertId": { "type": "integer", "minimum": 1 },
+    "alertVersion": { "type": "integer", "minimum": 1, "maximum": 3, "description": "1 = opened, +1 per later transition. Receiver keeps the highest seen." },
+    "transition": { "enum": ["opened", "acked", "resolved"] },
+    "status": { "enum": ["OPEN", "ACKED", "RESOLVED"], "description": "Alert status after this transition." },
+    "deviceId": { "type": "string", "pattern": "^dev-[0-9]{4,6}$" },
+    "ruleId": { "enum": ["temperature_high", "battery_low", "error_burst", "device_offline", "device_failed"] },
+    "backfilled": { "type": "boolean", "description": "true when the alert was opened from a replayed (buffered) sample, e.g. a fault that started and ended while the device was disconnected. Same value on every transition of the alert." },
+    "occurredAt": { "type": "string", "format": "date-time", "description": "Server time the transition committed." },
+    "openedAt": { "type": "string", "format": "date-time" },
+    "ackedAt": { "type": ["string", "null"], "format": "date-time" },
+    "resolvedAt": { "type": ["string", "null"], "format": "date-time" },
+    "resolvedBy": { "enum": ["auto", "operator", null] },
+    "triggerEventId": { "type": ["string", "null"], "format": "uuid", "description": "Event that opened the alert (null for alerts opened by the offline sweep or state-rule reopen)." },
+    "conditionStartedEventTime": { "type": ["string", "null"], "format": "date-time", "description": "Device event_time of the first breaching sample (device clock, may be skewed). Null for state rules opened by the sweep." }
+  },
+  "examples": [
+    {
+      "schemaVersion": 1,
+      "idempotencyKey": "alert-17-resolved",
+      "alertId": 17,
+      "alertVersion": 2,
+      "transition": "resolved",
+      "status": "RESOLVED",
+      "deviceId": "dev-0042",
+      "ruleId": "temperature_high",
+      "backfilled": true,
+      "occurredAt": "2026-10-16T12:40:01.120Z",
+      "openedAt": "2026-10-16T12:40:01.020Z",
+      "ackedAt": null,
+      "resolvedAt": "2026-10-16T12:40:01.120Z",
+      "resolvedBy": "auto",
+      "triggerEventId": "5d41402a-bc4b-3a76-b971-9d911017c592",
+      "conditionStartedEventTime": "2026-10-16T12:37:10.000Z"
+    }
+  ]
+}

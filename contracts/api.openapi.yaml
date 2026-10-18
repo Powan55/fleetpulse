@@ -1,0 +1,364 @@
+openapi: 3.1.0
+info:
+  title: FleetPulse api
+  version: 1.0.0
+  description: |
+    REST read model + alert actions for the UI. No auth (local-only stack). Browser reaches it same-origin via
+    the web container (http://localhost:8080/api/...); the scenario runner uses http://api:8080 on the compose network.
+    All timestamps RFC 3339 UTC. Errors are RFC 9457 problem+json (Problem schema), never stack traces.
+    Every POST requires a JSON body with Content-Type: application/json (ack/resolve: send `{}`). Missing body or any
+    other Content-Type -> 415, including a bodyless form post (Content-Length: 0). This keeps every mutation out of
+    the CORS "simple request" class, so a cross-site page cannot trigger it without a preflight, which fails.
+    Required test: POST .../ack with Content-Type application/x-www-form-urlencoded and Content-Length 0 -> 415, no change.
+    Change timestamps for latency measurement: device `stateChangedAt` = DB time of the latest transition
+    (= state_transition.occurred_at, same txn); alert `updatedAt` = DB time of the latest alert change.
+    Both are Postgres now() = txn start, so they precede commit by up to one batch duration.
+    SSE stream: GET /api/v1/stream, event schemas in sse-events.schema.json.
+servers:
+  - url: http://localhost:8080
+    description: via web/nginx (same origin as UI)
+  - url: http://api:8080
+    description: compose network (scenario runner). Host port 127.0.0.1:8081 only with the `compose.debug.yml` override file.
+paths:
+  /api/v1/fleet/summary:
+    get:
+      operationId: getFleetSummary
+      summary: Device count per state.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetSummary' }
+  /api/v1/devices:
+    get:
+      operationId: listDevices
+      summary: Device list, filter by state, paged, ordered by deviceId asc. size=1000 is the SSE resync snapshot.
+      parameters:
+        - { name: state, in: query, required: false, schema: { $ref: '#/components/schemas/DeviceState' } }
+        - { $ref: '#/components/parameters/Page' }
+        - name: size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DevicePage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v1/devices/{deviceId}:
+    get:
+      operationId: getDevice
+      summary: Device detail with recent telemetry, state history and alerts.
+      parameters:
+        - { $ref: '#/components/parameters/DeviceId' }
+        - name: telemetryLimit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 450, default: 450 }
+        - name: historyLimit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/alerts:
+    get:
+      operationId: listAlerts
+      summary: Alert list, filters, paged, ordered by alertId desc. status=OPEN,ACKED for open alerts.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Comma-separated subset.
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/AlertStatus' }
+            maxItems: 3
+        - name: deviceId
+          in: query
+          required: false
+          schema: { type: string, pattern: '^dev-[0-9]{4,6}$' }
+        - name: ruleId
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/RuleId' }
+        - { $ref: '#/components/parameters/Page' }
+        - name: size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v1/alerts/{alertId}:
+    get:
+      operationId: getAlert
+      summary: Single alert by id.
+      parameters:
+        - { $ref: '#/components/parameters/AlertId' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/alerts/{alertId}/ack:
+    post:
+      operationId: ackAlert
+      summary: Ack. OPEN -> ACKED + outbox row in one txn. ACKED -> 200 no-op (no outbox row). RESOLVED -> 409.
+      parameters:
+        - { $ref: '#/components/parameters/AlertId' }
+      requestBody:
+        required: true
+        description: JSON body required (use `{}`); see info.description.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActionRequest' }
+      responses:
+        '200':
+          description: Alert after the call (changed or already ACKED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/alerts/{alertId}/resolve:
+    post:
+      operationId: resolveAlert
+      summary: Manual resolve. OPEN|ACKED -> RESOLVED (resolvedBy=operator) + outbox row in one txn. RESOLVED -> 409.
+      parameters:
+        - { $ref: '#/components/parameters/AlertId' }
+      requestBody:
+        required: true
+        description: JSON body required (use `{}`); see info.description.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActionRequest' }
+      responses:
+        '200':
+          description: Alert after the call
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+  /api/v1/stream:
+    get:
+      operationId: stream
+      summary: SSE live stream. Events per sse-events.schema.json. No Last-Event-ID replay; client re-snapshots on every (re)connect.
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+components:
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^dev-[0-9]{4,6}$' }
+    AlertId:
+      name: alertId
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+  responses:
+    BadRequest:
+      description: Invalid parameter or body
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Unknown id
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Alert already RESOLVED (code=ALERT_RESOLVED). Body carries the current alert in `alert`.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnsupportedMediaType:
+      description: Body missing or Content-Type not application/json (code=UNSUPPORTED_MEDIA_TYPE)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    DeviceState:
+      type: string
+      enum: [HEALTHY, DEGRADED, FAILED, OFFLINE, RECOVERING]
+    AlertStatus:
+      type: string
+      enum: [OPEN, ACKED, RESOLVED]
+    RuleId:
+      type: string
+      enum: [temperature_high, battery_low, error_burst, device_offline, device_failed]
+    FleetSummary:
+      type: object
+      additionalProperties: false
+      required: [total, byState, asOf]
+      properties:
+        total: { type: integer, minimum: 0 }
+        byState:
+          type: object
+          additionalProperties: false
+          required: [HEALTHY, DEGRADED, FAILED, OFFLINE, RECOVERING]
+          properties:
+            HEALTHY: { type: integer, minimum: 0 }
+            DEGRADED: { type: integer, minimum: 0 }
+            FAILED: { type: integer, minimum: 0 }
+            OFFLINE: { type: integer, minimum: 0 }
+            RECOVERING: { type: integer, minimum: 0 }
+        asOf: { type: string, format: date-time }
+    DeviceSummary:
+      type: object
+      additionalProperties: false
+      required: [deviceId, state, stateVersion, stateChangedAt, lastSeenAt]
+      properties:
+        deviceId: { type: string }
+        state: { $ref: '#/components/schemas/DeviceState' }
+        stateVersion: { type: integer, minimum: 1, description: '+1 per transition. Client drops updates with stateVersion <= known.' }
+        stateChangedAt: { type: string, format: date-time, description: 'DB time of the latest transition = state_transition.occurred_at (start point for SSE latency).' }
+        lastSeenAt: { type: string, format: date-time, description: 'Broker append time of the latest in-order event.' }
+    DevicePage:
+      type: object
+      additionalProperties: false
+      required: [items, page, size, totalItems]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/DeviceSummary' } }
+        page: { type: integer }
+        size: { type: integer }
+        totalItems: { type: integer }
+    TelemetryPoint:
+      type: object
+      additionalProperties: false
+      required: [epoch, seq, eventTime, receivedAt, temperatureC, batteryPct, errorCount, replay]
+      properties:
+        epoch: { type: integer, format: int64 }
+        seq: { type: integer, format: int64 }
+        eventTime: { type: string, format: date-time, description: 'Device clock, may be skewed. Chart x-axis uses receivedAt or seq, not this.' }
+        receivedAt: { type: string, format: date-time }
+        temperatureC: { type: number }
+        batteryPct: { type: number }
+        errorCount: { type: integer }
+        replay: { type: boolean }
+    StateTransition:
+      type: object
+      additionalProperties: false
+      required: [id, fromState, toState, cause, occurredAt, replay]
+      properties:
+        id: { type: integer, format: int64 }
+        fromState: { $ref: '#/components/schemas/DeviceState' }
+        toState: { $ref: '#/components/schemas/DeviceState' }
+        cause: { type: string, enum: [telemetry, event_after_offline, offline_sweep] }
+        eventId: { type: [string, 'null'], format: uuid }
+        eventTime: { type: [string, 'null'], format: date-time }
+        occurredAt: { type: string, format: date-time }
+        replay: { type: boolean }
+    DeviceDetail:
+      type: object
+      additionalProperties: false
+      required: [deviceId, state, stateVersion, stateChangedAt, lastSeenAt, lastEpoch, lastSeq, recentTelemetry, stateHistory, alerts]
+      properties:
+        deviceId: { type: string }
+        state: { $ref: '#/components/schemas/DeviceState' }
+        stateVersion: { type: integer }
+        stateChangedAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        lastEventTime: { type: [string, 'null'], format: date-time }
+        lastEpoch: { type: integer, format: int64 }
+        lastSeq: { type: integer, format: int64, description: 'Last applied seq.' }
+        recentTelemetry:
+          type: array
+          description: 'Newest first by (epoch, seq), at most telemetryLimit, only rows inside the 15 min telemetry retention.'
+          items: { $ref: '#/components/schemas/TelemetryPoint' }
+        stateHistory:
+          type: array
+          description: Newest first.
+          items: { $ref: '#/components/schemas/StateTransition' }
+        alerts:
+          type: array
+          description: 'Newest first, max 50.'
+          items: { $ref: '#/components/schemas/Alert' }
+    Alert:
+      type: object
+      additionalProperties: false
+      required: [alertId, deviceId, ruleId, status, version, backfilled, openedAt, updatedAt]
+      properties:
+        alertId: { type: integer, format: int64 }
+        deviceId: { type: string }
+        ruleId: { $ref: '#/components/schemas/RuleId' }
+        status: { $ref: '#/components/schemas/AlertStatus' }
+        version: { type: integer, minimum: 1, description: '1 on open, +1 per transition. Client drops updates with version <= known.' }
+        backfilled: { type: boolean }
+        openedAt: { type: string, format: date-time }
+        ackedAt: { type: [string, 'null'], format: date-time }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+        resolvedBy: { type: [string, 'null'], enum: [auto, operator, null] }
+        updatedAt: { type: string, format: date-time, description: 'DB time of the latest change (alert.updated_at; start point for SSE latency).' }
+        triggerEventId: { type: [string, 'null'], format: uuid }
+        conditionStartedEventTime: { type: [string, 'null'], format: date-time }
+    AlertPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, size, totalItems]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+        page: { type: integer }
+        size: { type: integer }
+        totalItems: { type: integer }
+    ActionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        note: { type: string, maxLength: 200, description: 'Optional, logged only (JSON-escaped, truncated).' }
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, description: 'about:blank or a URI' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          enum: [VALIDATION_FAILED, NOT_FOUND, ALERT_RESOLVED, UNSUPPORTED_MEDIA_TYPE, INTERNAL]
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+        alert: { $ref: '#/components/schemas/Alert' }
+        traceId: { type: string }
