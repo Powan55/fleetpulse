@@ -1,0 +1,30 @@
+server.port: ${SERVER_PORT:8080}
+spring:
+  application.name: processor
+  kafka:
+    listener:
+      type: batch
+      ack-mode: batch
+      concurrency: ${FP_CONSUMER_CONCURRENCY:3}
+    consumer:
+      group-id: ${FP_GROUP_ID:fleetpulse-processor}
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: ${FP_MAX_POLL_RECORDS:500}
+      key-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+management:
+  endpoints.web.exposure.include: health
+  endpoint.health:
+    probes.enabled: true
+    group.readiness.include: readinessState,db
+  opentelemetry.resource-attributes:
+    service.instance.id: ${HOSTNAME:local}
+server.error.include-stacktrace: never
+fp:
+  topic: ${FP_TOPIC:fleetpulse.telemetry.v1}
+  dlq-topic: ${FP_DLQ_TOPIC:fleetpulse.telemetry.v1.dlq}
+  notify-channel: ${FP_NOTIFY_CHANNEL:fleetpulse_changes}
