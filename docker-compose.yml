@@ -1,0 +1,230 @@
+name: fleetpulse
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-hardened: &hardened
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *logging
+
+x-jvm: &jvm
+  <<: *hardened
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  healthcheck:
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /actuator/health/readiness HTTP/1.0\r\n\r\n' >&3 && read -r line <&3 && [[ $$line == *' 200'* ]]"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 60s
+
+services:
+  kafka:
+    <<: *hardened
+    image: apache/kafka:4.2.2@sha256:1213eb3943d551e5ed1fca7a4e109001cee35770b66a02a0c37a8964efe09b69
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 1.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-init:
+    <<: *hardened
+    image: apache/kafka:4.2.2@sha256:1213eb3943d551e5ed1fca7a4e109001cee35770b66a02a0c37a8964efe09b69
+    restart: "no"
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        t=/opt/kafka/bin/kafka-topics.sh
+        $$t --bootstrap-server kafka:9092 --create --if-not-exists --topic fleetpulse.telemetry.v1 \
+          --partitions 6 --replication-factor 1 \
+          --config retention.ms=7200000 --config retention.bytes=715827882 \
+          --config message.timestamp.type=LogAppendTime
+        $$t --bootstrap-server kafka:9092 --create --if-not-exists --topic fleetpulse.telemetry.v1.dlq \
+          --partitions 1 --replication-factor 1 --config retention.ms=86400000
+
+  postgres:
+    <<: *hardened
+    image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 1.5
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    environment:
+      POSTGRES_USER: fleetpulse
+      POSTGRES_PASSWORD: ${FP_PG_PASSWORD:-fleetpulse-local}
+      POSTGRES_DB: fleetpulse
+    command: ["postgres", "-c", "max_wal_size=2GB", "-c", "shared_buffers=384MB"]
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetpulse -d fleetpulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  migrate:
+    <<: *hardened
+    image: flyway/flyway:13.10.3@sha256:ad074befe29dc4151b7f61be741dc13d1c3d4e5e76fc59681c026108b54bdebe
+    restart: "no"
+    mem_limit: 512m
+    cpus: 1.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/fleetpulse
+      FLYWAY_USER: fleetpulse
+      FLYWAY_PASSWORD: ${FP_PG_PASSWORD:-fleetpulse-local}
+      FLYWAY_PLACEHOLDERS_APP_PASSWORD: ${FP_APP_PASSWORD:-fleetpulse-app-local}
+      FLYWAY_PLACEHOLDERS_API_PASSWORD: ${FP_API_PASSWORD:-fleetpulse-api-local}
+      FLYWAY_PLACEHOLDERS_RO_PASSWORD: ${FP_RO_PASSWORD:-fleetpulse-ro-local}
+    command: ["-locations=filesystem:/migrations", "-connectRetries=60", "migrate"]
+    volumes:
+      - ./db/migrations:/migrations:ro
+
+  simulator:
+    <<: *jvm
+    build:
+      context: ./simulator
+      dockerfile: ../infra/docker/simulator.Dockerfile
+    mem_limit: 1024m
+    cpus: 1.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: "8080"
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SIM_DEVICE_COUNT: ${SIM_DEVICE_COUNT:-1000}
+      SIM_SEED: ${SIM_SEED:-42}
+
+  processor:
+    <<: *jvm
+    build:
+      context: ./processor
+      dockerfile: ../infra/docker/processor.Dockerfile
+    mem_limit: 1024m
+    cpus: 1.5
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: "8080"
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fleetpulse
+      SPRING_DATASOURCE_USERNAME: fleetpulse_app
+      SPRING_DATASOURCE_PASSWORD: ${FP_APP_PASSWORD:-fleetpulse-app-local}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      FP_TOPIC: fleetpulse.telemetry.v1
+      FP_DLQ_TOPIC: fleetpulse.telemetry.v1.dlq
+      FP_GROUP_ID: fleetpulse-processor
+      FP_CONSUMER_CONCURRENCY: "3"
+      FP_MAX_POLL_RECORDS: "500"
+      FP_SESSION_TIMEOUT: 10s
+      FP_NOTIFY_CHANNEL: fleetpulse_changes
+      FP_TEST_HOOKS_ENABLED: "false"
+
+  api:
+    <<: *jvm
+    build:
+      context: ./api
+      dockerfile: ../infra/docker/api.Dockerfile
+    mem_limit: 768m
+    cpus: 0.5
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: "8080"
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fleetpulse
+      SPRING_DATASOURCE_USERNAME: fleetpulse_api
+      SPRING_DATASOURCE_PASSWORD: ${FP_API_PASSWORD:-fleetpulse-api-local}
+      FP_NOTIFY_CHANNEL: fleetpulse_changes
+      FP_SSE_FLUSH_INTERVAL: 250ms
+      FP_SSE_HEARTBEAT_INTERVAL: 15s
+      FP_SSE_RETRY: "2000"
+
+  web:
+    <<: *hardened
+    build:
+      context: ./web
+      dockerfile: ../infra/docker/web.Dockerfile
+      additional_contexts:
+        nginx: ./infra/nginx
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.1
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  scenarios:
+    <<: *hardened
+    build: ./scenarios
+    profiles: ["tools"]
+    restart: "no"
+    mem_limit: 512m
+    cpus: 1.0
+    volumes:
+      - ./scenarios/out:/app/out
+
+volumes:
+  kafka-data:
+  pg-data:
