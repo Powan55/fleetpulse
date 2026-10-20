@@ -352,8 +352,7 @@ components:
         instance: { type: string }
         code:
           type: string
-          description: 'PAYLOAD_TOO_LARGE = 413 (body over 64 KiB), LENGTH_REQUIRED = 411 (POST/PUT body without Content-Length), METHOD_NOT_ALLOWED = 405.'
-          enum: [VALIDATION_FAILED, NOT_FOUND, ALERT_RESOLVED, UNSUPPORTED_MEDIA_TYPE, PAYLOAD_TOO_LARGE, LENGTH_REQUIRED, METHOD_NOT_ALLOWED, INTERNAL]
+          enum: [VALIDATION_FAILED, NOT_FOUND, ALERT_RESOLVED, UNSUPPORTED_MEDIA_TYPE, INTERNAL]
         errors:
           type: array
           items:

@@ -95,7 +95,7 @@ The browser opens an SSE stream, fetches a REST snapshot, and then applies strea
 
 ## API errors
 
-The api and the simulator control API return errors as `application/problem+json` (RFC 9457), never stack traces. Each body has a `code` and a `type` of `urn:fleetpulse:problem:<code>` with the code lowercased and `_` turned into `-`, for example `urn:fleetpulse:problem:validation-failed`. Codes: `VALIDATION_FAILED` (400, bad fields listed in `errors`), `NOT_FOUND` (404), `METHOD_NOT_ALLOWED` (405), `ALERT_RESOLVED` (409), `LENGTH_REQUIRED` (411), `PAYLOAD_TOO_LARGE` (413, body over 64 KiB), `UNSUPPORTED_MEDIA_TYPE` (415), `INTERNAL` (500).
+The api and the simulator control API return errors as `application/problem+json` (RFC 9457), never stack traces. Each body has a `code` and a `type` of `urn:fleetpulse:problem:<code>` with the code lowercased and `_` turned into `-`, for example `urn:fleetpulse:problem:validation-failed`. Codes: `VALIDATION_FAILED` (400, bad fields listed in `errors`; also used for 405, 411 and 413 since the `status` field carries the real status), `NOT_FOUND` (404), `ALERT_RESOLVED` (409), `UNSUPPORTED_MEDIA_TYPE` (415), `INTERNAL` (500).
 
 ## Observability
 
