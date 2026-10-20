@@ -17,7 +17,8 @@ import tools.jackson.databind.json.JsonMapper;
 /** Total validation of the telemetry envelope; never throws, returns a DLQ reason instead. */
 final class Validator {
 
-    record Event(String deviceId, long epoch, long seq, long eventTimeMicros) {}
+    record Event(String eventId, String deviceId, long epoch, long seq, long eventTimeMicros, boolean telemetry,
+                 boolean replay, double temperatureC, double batteryPct, int errorCount) {}
 
     record Result(Event event, String reason) {
         static Result ok(Event e) { return new Result(e, null); }
@@ -69,7 +70,11 @@ final class Validator {
         if (key == null || !Arrays.equals(key, deviceId.getBytes(StandardCharsets.UTF_8))) return Result.bad("key_mismatch");
         long epoch = n.get("epoch").asLong();
         if (epoch > brokerTimeMs + 24L * 3600_000L) return Result.bad("epoch_future");
-        return Result.ok(new Event(deviceId, epoch, n.get("seq").asLong(), micros));
+        boolean tel = "telemetry".equals(type);
+        JsonNode p = n.get("payload");
+        return Result.ok(new Event(eventId, deviceId, epoch, n.get("seq").asLong(), micros, tel, n.get("replay").asBoolean(),
+                tel ? p.get("temperature_c").asDouble() : 0, tel ? p.get("battery_pct").asDouble() : 0,
+                tel ? p.get("error_count").asInt() : 0));
     }
 
     private static boolean payloadOk(JsonNode p, boolean telemetry) {

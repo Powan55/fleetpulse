@@ -28,3 +28,8 @@ fp:
   topic: ${FP_TOPIC:fleetpulse.telemetry.v1}
   dlq-topic: ${FP_DLQ_TOPIC:fleetpulse.telemetry.v1.dlq}
   notify-channel: ${FP_NOTIFY_CHANNEL:fleetpulse_changes}
+  retention:
+    inbox: ${FP_RETENTION_INBOX:30m}
+    telemetry: ${FP_RETENTION_TELEMETRY:15m}
+    late: ${FP_RETENTION_LATE:1h}
+    interval: ${FP_RETENTION_INTERVAL:60s}

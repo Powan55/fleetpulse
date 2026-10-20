@@ -10,9 +10,11 @@ import org.springframework.boot.kafka.autoconfigure.DefaultKafkaConsumerFactoryC
 import org.springframework.context.annotation.Bean;
 import org.springframework.kafka.listener.CommonErrorHandler;
 import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.util.backoff.FixedBackOff;
 
 @SpringBootApplication
+@EnableScheduling
 public class ProcessorApplication {
 
     public static void main(String[] args) {
