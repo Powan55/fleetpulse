@@ -7,8 +7,8 @@ import subprocess
 from lib import Inconclusive
 
 PROJECT = os.environ.get("COMPOSE_PROJECT_NAME", "fleetpulse")
-SERVICES = frozenset({"simulator", "sink", "processor", "api", "postgres", "kafka", "web"})
-CONTROL = frozenset({"kill", "start", "stop", "restart", "pause", "unpause"})
+SERVICES = frozenset({"simulator", "sink", "processor", "api", "postgres", "kafka"})
+CONTROL = frozenset({"kill", "start", "stop", "restart"})
 _ID = re.compile(r"^[0-9a-f]{12,64}$")
 
 
