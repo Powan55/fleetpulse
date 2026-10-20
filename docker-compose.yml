@@ -131,6 +131,7 @@ services:
       dockerfile: ../infra/docker/simulator.Dockerfile
     mem_limit: 1024m
     cpus: 1.0
+    stop_grace_period: 20s
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -140,6 +141,11 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SIM_DEVICE_COUNT: ${SIM_DEVICE_COUNT:-1000}
       SIM_SEED: ${SIM_SEED:-42}
+      SIM_EPOCH: ${SIM_EPOCH:-}
+      SIM_HEARTBEAT_INTERVAL: ${SIM_HEARTBEAT_INTERVAL:-2s}
+      SIM_TELEMETRY_INTERVAL: ${SIM_TELEMETRY_INTERVAL:-2s}
+      SIM_BUFFER_CAPACITY: ${SIM_BUFFER_CAPACITY:-400}
+      SIM_MAX_SEND_RATE: ${SIM_MAX_SEND_RATE:-2000}
 
   processor:
     <<: *jvm
@@ -148,6 +154,7 @@ services:
       dockerfile: ../infra/docker/processor.Dockerfile
     mem_limit: 1024m
     cpus: 1.5
+    stop_grace_period: 20s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -222,8 +229,12 @@ services:
     restart: "no"
     mem_limit: 512m
     cpus: 1.0
+    environment:
+      PGPASSWORD: ${FP_RO_PASSWORD:-fleetpulse-ro-local}
+      COMPOSE_PROJECT_NAME: fleetpulse
     volumes:
       - ./scenarios/out:/app/out
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   kafka-data:
