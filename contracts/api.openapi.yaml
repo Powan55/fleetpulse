@@ -18,7 +18,7 @@ servers:
   - url: http://localhost:8080
     description: via web/nginx (same origin as UI)
   - url: http://api:8080
-    description: compose network (scenario runner). Host port 127.0.0.1:8081 only with the `compose.debug.yml` override file.
+    description: compose network (scenario runner). Host port 127.0.0.1:8084 only with the `compose.debug.yml` override file (change it with `FP_DEBUG_API_PORT`).
 paths:
   /api/v1/fleet/summary:
     get:
@@ -344,7 +344,7 @@ components:
       type: object
       required: [type, title, status, code]
       properties:
-        type: { type: string, description: 'about:blank or a URI' }
+        type: { type: string, description: '`urn:fleetpulse:problem:<code>`, where <code> is the `code` value lowercased with `_` replaced by `-` (e.g. urn:fleetpulse:problem:not-found).' }
         title: { type: string }
         status: { type: integer }
         detail: { type: string }

@@ -6,6 +6,7 @@ Devices are HEALTHY, DEGRADED, FAILED, OFFLINE or RECOVERING. A metric oscillati
 ## Decision
 - No clock. Hysteresis counts in-order telemetry samples. Heartbeats carry no metrics and don't count; late events don't count. Constants come from `contracts/rules.yaml`: 3 samples to worsen, 5 to improve, 5 in RECOVERING to reach HEALTHY.
 - Each sample's severity is the worst over temperature, battery and error count: OK, DEGRADED or FAILED. Three counters on the device row track consecutive bad, failed and OK samples.
+- A device row is created by its first event and starts HEALTHY with all counters at zero. That first event's sample is then evaluated like any other, so a device that is already faulty needs 3 bad samples before it leaves HEALTHY.
 
 | From | To | When |
 |---|---|---|
@@ -27,3 +28,4 @@ Devices are HEALTHY, DEGRADED, FAILED, OFFLINE or RECOVERING. A metric oscillati
 - Live, 3 samples take about 6 s; replayed, nearly 0 s. That's intended.
 - The densest flapping loop (RECOVERING to DEGRADED to FAILED and back) gives at most 3 transitions per 22 s per device.
 - Streaks live on the device row, so one UPDATE per device per batch covers state and rules.
+- Starting HEALTHY means a fresh stack shows a green fleet until real samples say otherwise. Creating the row doesn't count as a transition, so it writes no history entry and opens no alert.

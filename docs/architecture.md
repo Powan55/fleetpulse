@@ -74,6 +74,7 @@ stateDiagram-v2
   OFFLINE --> RECOVERING: any new event
 ```
 
+- **New devices**: there is no seed data. A device row is created by the device's first event and starts HEALTHY, with no history entry and no alert. From there its samples move it like any other device.
 - Each telemetry sample is OK, DEGRADED or FAILED depending on thresholds in [`rules.yaml`](../contracts/rules.yaml) (for example temperature 70 C and up is degraded, 85 C and up is failed).
 - Hysteresis counts samples in order, not seconds: 3 bad samples to get worse, 5 good ones to get better. A replayed burst behaves exactly like live data, and clock skew can't affect it. At one sample per 2 s that is about 6 s to raise and 10 s to clear.
 - **Offline**: a device with no new event for 10 s goes OFFLINE. "Last seen" is the broker's append time, not the device clock, so a skewed clock never makes a live device look dead. The sweep runs every second.
@@ -92,6 +93,10 @@ stateDiagram-v2
 
 The browser opens an SSE stream, fetches a REST snapshot, and then applies stream updates. Each device and alert carries a version number, so out-of-order or repeated updates are ignored. On any reconnect the client re-fetches the snapshot instead of trying to replay missed events. Target: the UI matches the server within 5 s of reconnecting.
 
+## API errors
+
+Errors are `application/problem+json` (RFC 9457), never stack traces. Each body has a `code` (`VALIDATION_FAILED`, `NOT_FOUND`, `ALERT_RESOLVED`, `UNSUPPORTED_MEDIA_TYPE`, `INTERNAL`) and a `type` of `urn:fleetpulse:problem:<code>` with the code lowercased and `_` turned into `-`, for example `urn:fleetpulse:problem:validation-failed`. Validation errors list the bad fields in `errors`.
+
 ## Observability
 
 - Services export metrics and traces over OTLP to an OpenTelemetry Collector. Metrics go to Prometheus, traces to Tempo; Grafana dashboards are provisioned from the repo.
@@ -103,7 +108,7 @@ The browser opens an SSE stream, fetches a REST snapshot, and then applies strea
 
 - `docker compose up` builds everything inside Docker (no local JDK or Node needed) and starts the stack.
 - UI: http://localhost:8080. Grafana: http://localhost:3000. Both bound to 127.0.0.1 only.
-- `docker compose -f docker-compose.yml -f compose.debug.yml up -d` also publishes the api, simulator, sink and Prometheus ports on 127.0.0.1 for curl. These skip nginx's host check, so only use them while debugging.
+- `docker compose -f docker-compose.yml -f compose.debug.yml up -d` also publishes the api (8084), simulator (8082), sink (8083) and Prometheus (9090) on 127.0.0.1 for curl. Set `FP_DEBUG_API_PORT` or `FP_DEBUG_SIM_PORT` if one of those ports is taken. These skip nginx's host check, so only use them while debugging.
 - Chaos scenarios run in a container: `docker compose --profile tools run --rm scenarios ...`. That container gets the Docker socket so it can kill and restart services.
 - `docker compose down -v` resets all data.
 
