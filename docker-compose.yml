@@ -175,6 +175,10 @@ services:
       FP_SESSION_TIMEOUT: 10s
       FP_NOTIFY_CHANNEL: fleetpulse_changes
       FP_TEST_HOOKS_ENABLED: "false"
+      FP_RETENTION_INBOX: ${FP_RETENTION_INBOX:-30m}
+      FP_RETENTION_TELEMETRY: ${FP_RETENTION_TELEMETRY:-15m}
+      FP_RETENTION_LATE: ${FP_RETENTION_LATE:-1h}
+      FP_RETENTION_INTERVAL: ${FP_RETENTION_INTERVAL:-60s}
 
   api:
     <<: *jvm
@@ -226,6 +230,7 @@ services:
     <<: *hardened
     build: ./scenarios
     profiles: ["tools"]
+    user: "0"
     restart: "no"
     mem_limit: 512m
     cpus: 1.0
