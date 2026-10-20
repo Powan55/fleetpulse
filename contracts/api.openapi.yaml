@@ -342,6 +342,7 @@ components:
         note: { type: string, maxLength: 200, description: 'Optional, logged only (JSON-escaped, truncated).' }
     Problem:
       type: object
+      description: Shared by the api and the simulator control API.
       required: [type, title, status, code]
       properties:
         type: { type: string, description: '`urn:fleetpulse:problem:<code>`, where <code> is the `code` value lowercased with `_` replaced by `-` (e.g. urn:fleetpulse:problem:not-found).' }
@@ -351,7 +352,8 @@ components:
         instance: { type: string }
         code:
           type: string
-          enum: [VALIDATION_FAILED, NOT_FOUND, ALERT_RESOLVED, UNSUPPORTED_MEDIA_TYPE, INTERNAL]
+          description: 'PAYLOAD_TOO_LARGE = 413 (body over 64 KiB), LENGTH_REQUIRED = 411 (POST/PUT body without Content-Length), METHOD_NOT_ALLOWED = 405.'
+          enum: [VALIDATION_FAILED, NOT_FOUND, ALERT_RESOLVED, UNSUPPORTED_MEDIA_TYPE, PAYLOAD_TOO_LARGE, LENGTH_REQUIRED, METHOD_NOT_ALLOWED, INTERNAL]
         errors:
           type: array
           items:

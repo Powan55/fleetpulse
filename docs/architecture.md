@@ -1,6 +1,6 @@
 # FleetPulse architecture
 
-Status: design, not built yet. Numbers below are targets for a single laptop (16 GB RAM, 8 cores, Docker Desktop).
+Status: partly built. Working today: the simulator with chaos controls and ledger, ingest with dedupe, ordering, dead-letter handling and retention, the REST read model with live SSE updates, the fleet grid and device detail, and the scenario runner. Still to come: device health state machine, alerts and webhooks, mock sink, faults and disconnects, offline sweep, metrics and trace export with dashboards. Numbers below are targets for a single laptop (16 GB RAM, 8 cores, Docker Desktop) until measured.
 
 ## What it is
 
@@ -95,7 +95,7 @@ The browser opens an SSE stream, fetches a REST snapshot, and then applies strea
 
 ## API errors
 
-Errors are `application/problem+json` (RFC 9457), never stack traces. Each body has a `code` (`VALIDATION_FAILED`, `NOT_FOUND`, `ALERT_RESOLVED`, `UNSUPPORTED_MEDIA_TYPE`, `INTERNAL`) and a `type` of `urn:fleetpulse:problem:<code>` with the code lowercased and `_` turned into `-`, for example `urn:fleetpulse:problem:validation-failed`. Validation errors list the bad fields in `errors`.
+The api and the simulator control API return errors as `application/problem+json` (RFC 9457), never stack traces. Each body has a `code` and a `type` of `urn:fleetpulse:problem:<code>` with the code lowercased and `_` turned into `-`, for example `urn:fleetpulse:problem:validation-failed`. Codes: `VALIDATION_FAILED` (400, bad fields listed in `errors`), `NOT_FOUND` (404), `METHOD_NOT_ALLOWED` (405), `ALERT_RESOLVED` (409), `LENGTH_REQUIRED` (411), `PAYLOAD_TOO_LARGE` (413, body over 64 KiB), `UNSUPPORTED_MEDIA_TYPE` (415), `INTERNAL` (500).
 
 ## Observability
 

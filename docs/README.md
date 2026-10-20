@@ -1,6 +1,6 @@
 # FleetPulse docs
 
-- [Architecture](architecture.md): what the system does, how an event flows, device states, alerts, live UI, observability, scope.
+- [Architecture](architecture.md): what the system does, how an event flows, device states, alerts, live UI, API errors, observability, scope.
 - Decision records (`adr/`):
   - [0001 Build layout and versions](adr/0001-build-layout-and-versions.md)
   - [0002 Inbox dedupe and offset commit](adr/0002-inbox-dedupe-and-offset-commit.md)
@@ -17,4 +17,4 @@
   - [0013 Web proxy and port exposure](adr/0013-web-proxy-and-exposure.md)
 - Interface specs live in [`../contracts/`](../contracts/): Kafka envelope, REST and SSE, webhook payload, simulator and sink control APIs, database schema, alert rules.
 
-Status: design. Nothing here is built or measured yet; numbers are targets.
+Status: partly built (ingest, dedupe, ordering, read API, fleet and device views, scenario runner). Alerts, webhooks, faults and dashboards are still in progress; see the status line in [architecture.md](architecture.md). Performance numbers are targets until measured.
