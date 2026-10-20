@@ -1,4 +1,4 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;

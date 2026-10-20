@@ -1,8 +1,8 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
-import com.fleetpulse.api.Dto.DevicePage;
-import com.fleetpulse.api.Dto.DeviceSummary;
-import com.fleetpulse.api.Dto.FleetSummary;
+import dev.fleetpulse.api.Dto.DevicePage;
+import dev.fleetpulse.api.Dto.DeviceSummary;
+import dev.fleetpulse.api.Dto.FleetSummary;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;

@@ -1,4 +1,4 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
 import java.net.URI;
 import org.slf4j.Logger;

@@ -1,7 +1,7 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
-import com.fleetpulse.api.Dto.DevicePage;
-import com.fleetpulse.api.Dto.FleetSummary;
+import dev.fleetpulse.api.Dto.DevicePage;
+import dev.fleetpulse.api.Dto.FleetSummary;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;

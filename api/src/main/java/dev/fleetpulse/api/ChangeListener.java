@@ -1,4 +1,4 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;

@@ -10,7 +10,7 @@
     <relativePath/>
   </parent>
 
-  <groupId>com.fleetpulse</groupId>
+  <groupId>dev.fleetpulse</groupId>
   <artifactId>api</artifactId>
   <version>0.1.0</version>
   <name>fleetpulse-api</name>

@@ -1,4 +1,4 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
 import java.time.Instant;
 import java.util.List;

@@ -1,8 +1,8 @@
-package com.fleetpulse.api;
+package dev.fleetpulse.api;
 
-import com.fleetpulse.api.Dto.Hello;
-import com.fleetpulse.api.Dto.Items;
-import com.fleetpulse.api.Dto.Resync;
+import dev.fleetpulse.api.Dto.Hello;
+import dev.fleetpulse.api.Dto.Items;
+import dev.fleetpulse.api.Dto.Resync;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
