@@ -50,16 +50,18 @@ def run(c: Checks):
         raise Inconclusive("second run produced more events than the first; cannot compare as a subset")
     r1, _, _ = topic.events(start - 5000, epoch, until_ms=restart)
     r2, _, _ = topic.events(restart, epoch)
-    compared = bad_id = bad_payload = 0
+    compared = bad_id = bad_type = bad_payload = 0
     for dev, seqs in r2.items():
-        for seq, (eid, payload) in seqs.items():
+        for seq, (eid, payload, kind) in seqs.items():
             if seq in r1.get(dev, {}):
                 compared += 1
                 bad_id += r1[dev][seq][0] != eid
+                bad_type += r1[dev][seq][2] != kind
                 bad_payload += r1[dev][seq][1] != payload
     if compared < MIN_COMPARED:
         raise Inconclusive(f"only {compared} (device, seq) pairs in both runs")
     c.add("same event id for every (device, seq) in both runs", bad_id == 0, f"{compared} compared, {bad_id} differ")
+    c.add("same event type for every (device, seq) in both runs", bad_type == 0, f"{bad_type} differ")
     c.add("same payload for every (device, seq) in both runs", bad_payload == 0, f"{bad_payload} differ")
     c.add("second run applied nothing new", applied2 == applied1, f"applied_count total {applied1} -> {applied2}")
     dlq_check(c, start)

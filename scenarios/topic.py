@@ -91,7 +91,7 @@ def envelope(m):
 def events(since_ms=0, epoch=None, until_ms=None, min_seq=None):
     """(by_device, records, conflicts).
 
-    by_device = {device: {seq: (event_id, payload)}} for parseable envelopes, unique by event_id.
+    by_device = {device: {seq: (event_id, payload, type)}} for parseable envelopes, unique by event_id.
     conflicts lists (device, seq) seen with two different event_ids. min_seq {device: n} skips seq <= n.
     """
     by, records, conflicts = {}, 0, []
@@ -106,7 +106,7 @@ def events(since_ms=0, epoch=None, until_ms=None, min_seq=None):
         prev = slot.get(d["seq"])
         if prev and prev[0] != d["event_id"]:
             conflicts.append((d["device_id"], d["seq"]))
-        slot[d["seq"]] = (d["event_id"], d.get("payload"))
+        slot[d["seq"]] = (d["event_id"], d.get("payload"), d.get("type"))
     return by, records, conflicts
 
 

@@ -29,7 +29,7 @@ def run(c: Checks):
         by, nrec, conflicts = topic.events(start - 5000, led["epoch"], min_seq=m0)
     finally:
         sim("PUT", "/generation", {"paused": False})
-    got = {dev: {e for e, _ in s.values()} for dev, s in by.items()}
+    got = {dev: {v[0] for v in s.values()} for dev, s in by.items()}
     bad = [d for d in sorted(expected.keys() | got.keys()) if expected.get(d, set()) != got.get(d, set())]
     c.add("topic event ids equal the ledger-derived ids for every device", not bad, f"{len(bad)} devices differ; {nrec} records, {sum(map(len, expected.values()))} ledger events")
     for d in bad[:50]:
