@@ -65,6 +65,25 @@ http
       const items = [...devices.values()].sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
       return json({ items, page: 0, size: 1000, totalItems: items.length });
     }
+    const m = /^\/api\/v1\/devices\/([^/]+)$/.exec(url.pathname);
+    if (m) {
+      const problem = (status, code, title) => {
+        res.writeHead(status, { 'Content-Type': 'application/problem+json' });
+        res.end(JSON.stringify({ type: `urn:fleetpulse:problem:${code.toLowerCase().replace('_', '-')}`, title, status, code }));
+      };
+      if (!/^dev-[0-9]{4,6}$/.test(m[1])) return problem(400, 'VALIDATION_FAILED', 'Invalid deviceId');
+      const d = devices.get(m[1]);
+      if (!d) return problem(404, 'NOT_FOUND', 'Device not found');
+      const n = Number(m[1].slice(4));
+      const recentTelemetry = Array.from({ length: 450 }, (_, i) => ({
+        epoch: 1, seq: 1000 - i, eventTime: now(), receivedAt: now(),
+        temperatureC: 20 + ((n + i) % 15), batteryPct: 100 - ((n + i) % 40), errorCount: i % 7 === 0 ? 1 : 0, replay: false,
+      }));
+      const stateHistory = Array.from({ length: Math.min(d.stateVersion - 1, 50) }, (_, i) => ({
+        id: 100 - i, fromState: 'HEALTHY', toState: d.state, cause: 'telemetry', eventId: null, eventTime: null, occurredAt: now(), replay: false,
+      }));
+      return json({ ...d, lastEventTime: now(), lastEpoch: 1, lastSeq: 1000, recentTelemetry, stateHistory, alerts: [] });
+    }
     if (url.pathname === '/api/v1/stream') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
       res.write(`retry: 2000\nevent: hello\ndata: ${JSON.stringify({ serverInstance: 'mock', at: now() })}\n\n`);

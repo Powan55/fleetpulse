@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { applyDevices, fromSnapshot, newerSummary, sortedDevices } from './store';
 import { Tile, App } from './App';
+import { DetailView } from './Detail';
 import type { Device, Summary } from './types';
 
 const dev = (deviceId: string, stateVersion: number, state: Device['state'] = 'HEALTHY'): Device => ({
@@ -65,5 +66,52 @@ describe('markup', () => {
     expect(html).toContain('data-testid="connection-indicator"');
     expect(html).toContain('data-testid="state-filter"');
     expect(html).toContain('data-ready="false"');
+  });
+
+  it('tile links to the detail route', () => {
+    expect(renderToStaticMarkup(<Tile d={dev('dev-0007', 1)} />)).toContain('href="#/devices/dev-0007"');
+  });
+
+  it('detail shows 404 as a message', () => {
+    const html = renderToStaticMarkup(
+      <DetailView id="dev-0999" result={{ ok: false, status: 404, message: 'x' }} onRetry={() => {}} />,
+    );
+    expect(html).toContain('data-testid="detail-not-found"');
+    expect(html).toContain('dev-0999 not found');
+  });
+
+  it('detail renders fields, telemetry and history', () => {
+    const detail = {
+      ...dev('dev-0001', 2, 'FAILED'),
+      lastEpoch: 3,
+      lastSeq: 42,
+      recentTelemetry: [
+        {
+          epoch: 3,
+          seq: 42,
+          eventTime: '',
+          receivedAt: '2026-01-01T00:00:00Z',
+          temperatureC: 21.5,
+          batteryPct: 80,
+          errorCount: 0,
+          replay: false,
+        },
+      ],
+      stateHistory: [
+        {
+          id: 1,
+          fromState: 'HEALTHY' as const,
+          toState: 'FAILED' as const,
+          cause: 'telemetry',
+          occurredAt: '2026-01-01T00:00:00Z',
+          replay: false,
+        },
+      ],
+      alerts: [],
+    };
+    const html = renderToStaticMarkup(<DetailView id="dev-0001" result={{ ok: true, detail }} onRetry={() => {}} />);
+    for (const t of ['detail-state', 'detail-last-seq', 'telemetry-row', 'history-row'])
+      expect(html).toContain(`data-testid="${t}"`);
+    expect(html).toContain('>42<');
   });
 });
