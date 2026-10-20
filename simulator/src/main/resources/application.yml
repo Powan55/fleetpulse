@@ -18,6 +18,7 @@ sim:
   epoch:
   heartbeat-interval: 2s
   telemetry-interval: 2s
+  reorder-hold: 1s
 
 management:
   endpoints:

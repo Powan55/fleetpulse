@@ -10,7 +10,8 @@ public record SimProperties(
         long seed,
         Long epoch,
         Duration heartbeatInterval,
-        Duration telemetryInterval) {
+        Duration telemetryInterval,
+        Duration reorderHold) {
 
     public SimProperties {
         if (topic == null || topic.isBlank()) {
@@ -24,6 +25,12 @@ public record SimProperties(
         }
         if (telemetryInterval == null || telemetryInterval.toMillis() < 1) {
             throw new IllegalArgumentException("sim.telemetry-interval must be >= 1ms");
+        }
+        if (reorderHold == null) {
+            reorderHold = Duration.ofSeconds(1);
+        }
+        if (reorderHold.toMillis() < 1) {
+            throw new IllegalArgumentException("sim.reorder-hold must be >= 1ms");
         }
         if (epoch != null && epoch < 1) {
             throw new IllegalArgumentException("sim.epoch must be positive");

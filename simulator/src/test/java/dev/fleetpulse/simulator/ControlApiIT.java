@@ -48,6 +48,7 @@ import tools.jackson.databind.json.JsonMapper;
             "sim.epoch=1792130400000",
             "sim.heartbeat-interval=100ms",
             "sim.telemetry-interval=100ms",
+            "sim.reorder-hold=300ms",
             "sim.topic=sim-ctl"
         })
 class ControlApiIT {
@@ -110,7 +111,7 @@ class ControlApiIT {
         problem(call("POST", "/chaos/malformed", "text/plain", "{}"), 415, "UNSUPPORTED_MEDIA_TYPE");
         problem(call("PUT", "/generation", "text/plain", "{}"), 415, "UNSUPPORTED_MEDIA_TYPE");
 
-        problem(call("PUT", "/chaos", "application/json", "x".repeat(70_000)), 413, "PAYLOAD_TOO_LARGE");
+        problem(call("PUT", "/chaos", "application/json", "x".repeat(70_000)), 413, "VALIDATION_FAILED");
         bad("PUT", "/chaos", "{");
         bad("PUT", "/chaos", "");
         bad("PUT", "/chaos", "[]");
@@ -166,6 +167,12 @@ class ControlApiIT {
             }
         }
         return bySeq;
+    }
+
+    private static long seq(ConsumerRecord<String, String> rec) {
+        Matcher m = SEQ.matcher(rec.value());
+        assertTrue(m.find());
+        return Long.parseLong(m.group(1));
     }
 
     private long endOffsets(KafkaConsumer<String, String> c) {
@@ -247,6 +254,33 @@ class ControlApiIT {
             }
             assertEquals(accepted, total);
             assertTrue(outOfOrder, "reorder produced no out-of-order seq on the topic");
+
+            Map<String, List<ConsumerRecord<String, String>>> perKey = new HashMap<>();
+            for (ConsumerRecord<String, String> rec : all) {
+                perKey.computeIfAbsent(rec.key(), k -> new ArrayList<>()).add(rec);
+            }
+            int late = 0;
+            int slow = 0;
+            for (List<ConsumerRecord<String, String>> recs : perKey.values()) {
+                Set<Long> seenSeq = new HashSet<>();
+                for (int i = 0; i < recs.size(); i++) {
+                    long s = seq(recs.get(i));
+                    if (!seenSeq.add(s)) {
+                        continue;
+                    }
+                    for (int j = 0; j < i; j++) {
+                        if (seq(recs.get(j)) > s) {
+                            late++;
+                            long gap = recs.get(i).timestamp() - recs.get(j).timestamp();
+                            assertTrue(gap >= 0);
+                            slow += gap >= 200 ? 1 : 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            // the pause flush releases at most one early event per device
+            assertTrue(slow > 0 && slow >= late - 20, slow + " of " + late + " late events had a hold-back gap");
 
             long before = endOffsets(c);
             Thread.sleep(1500);

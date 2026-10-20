@@ -40,7 +40,7 @@ class FleetTest {
             sent.add(new Sent(inv.getArgument(1), inv.getArgument(2)));
             return CompletableFuture.completedFuture(null);
         });
-        Fleet f = new Fleet(new SimProperties("t", devices, seed, 1000L, Duration.ofSeconds(2), Duration.ofSeconds(2)),
+        Fleet f = new Fleet(new SimProperties("t", devices, seed, 1000L, Duration.ofSeconds(2), Duration.ofSeconds(2), Duration.ofSeconds(1)),
                 kafka);
         f.init(0);
         return f;
@@ -62,6 +62,7 @@ class FleetTest {
             Fleet f = fleet(30, 7);
             f.setChaos(MIXED);
             f.tick(20 * SEC);
+            f.tick(25 * SEC);
             runs.add(sent.stream().map(s -> s.key() + find(ID, s.value())
                     + find(Pattern.compile("\"payload\":(.*)\\}$"), s.value())).toList().toString());
         }
@@ -128,7 +129,12 @@ class FleetTest {
         Fleet f = fleet(1, 42);
         f.setChaos(new Chaos(0, 0, 1, List.of(), true, null));
         f.tick(10 * SEC);
+        f.tick(10 * SEC + SEC / 2);
+        int beforeRelease = sent.size();
+        f.tick(12 * SEC);
         List<Long> seqs = sent.stream().map(s -> Long.parseLong(find(SEQ, s.value()))).toList();
+        assertTrue(beforeRelease < seqs.size());
+        assertTrue(seqs.get(beforeRelease) < seqs.get(beforeRelease - 1), "held event not released after hold: " + seqs);
         assertTrue(f.counters.reordered.get() > 0);
         boolean outOfOrder = false;
         for (int i = 1; i < seqs.size(); i++) {

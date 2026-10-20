@@ -35,6 +35,9 @@ class Fleet implements SmartLifecycle {
     private final long[] nextHb;
     private final long[] nextTel;
     private final Device.Event[] held;
+    private final long[] heldAt;
+    private final long[] maxSent;
+    private final long holdNanos;
     private final List<Integer> skewOrder = new ArrayList<>();
     private final Object lock = new Object();
     private final AtomicLong inflight = new AtomicLong();
@@ -62,6 +65,9 @@ class Fleet implements SmartLifecycle {
         nextHb = new long[devices.size()];
         nextTel = new long[devices.size()];
         held = new Device.Event[devices.size()];
+        heldAt = new long[devices.size()];
+        maxSent = new long[devices.size()];
+        holdNanos = props.reorderHold().toNanos();
         skewMs = new long[devices.size()];
         ledger = new Ledger(devices.size());
     }
@@ -159,11 +165,7 @@ class Fleet implements SmartLifecycle {
                 return;
             }
             for (int i = 0; i < held.length; i++) {
-                if (held[i] != null) {
-                    Device.Event e = held[i];
-                    held[i] = null;
-                    transmit(i, e);
-                }
+                release(i);
             }
         }
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PAUSE_WAIT_MS);
@@ -189,12 +191,15 @@ class Fleet implements SmartLifecycle {
                     return;
                 }
                 for (int i = 0; i < devices.size(); i++) {
+                    if (held[i] != null && now - heldAt[i] >= holdNanos) {
+                        release(i);
+                    }
                     while (nextHb[i] <= now) {
-                        generate(i, "heartbeat");
+                        generate(i, "heartbeat", now);
                         nextHb[i] += hbNanos;
                     }
                     while (nextTel[i] <= now) {
-                        generate(i, "telemetry");
+                        generate(i, "telemetry", now);
                         nextTel[i] += telNanos;
                     }
                 }
@@ -205,7 +210,7 @@ class Fleet implements SmartLifecycle {
     }
 
     // Draw order per device is fixed (drop, reorder, then dup per transmit) so a seed replays the same decisions.
-    private void generate(int i, String type) {
+    private void generate(int i, String type, long now) {
         Device d = devices.get(i);
         Chaos ch = chaos;
         long skew = skewMs[i];
@@ -221,20 +226,29 @@ class Fleet implements SmartLifecycle {
             return;
         }
         counters.buffered.incrementAndGet();
-        Device.Event prev = held[i];
-        if (prev == null && reorder < ch.reorderRate()) {
+        if (held[i] == null && reorder < ch.reorderRate()) {
             held[i] = e;
+            heldAt[i] = now;
             return;
         }
         transmit(i, e);
-        if (prev != null) {
-            held[i] = null;
-            counters.reordered.incrementAndGet();
-            transmit(i, prev);
+    }
+
+    /** Sends the held event; it counts as reordered when a later seq already went out. */
+    private void release(int i) {
+        Device.Event e = held[i];
+        if (e == null) {
+            return;
         }
+        held[i] = null;
+        if (maxSent[i] > e.seq()) {
+            counters.reordered.incrementAndGet();
+        }
+        transmit(i, e);
     }
 
     private void transmit(int i, Device.Event e) {
+        maxSent[i] = Math.max(maxSent[i], e.seq());
         send(i, e, true);
         if (devices.get(i).chaos.nextDouble() < chaos.duplicateRate()) {
             counters.injectedDups.incrementAndGet();
