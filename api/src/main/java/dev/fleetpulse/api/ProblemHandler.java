@@ -37,7 +37,7 @@ public class ProblemHandler extends ResponseEntityExceptionHandler {
         if (body == null) body = ProblemDetail.forStatus(status);
         if (body instanceof ProblemDetail p) {
             p.setProperty("code", switch (status.value()) {
-                case 400 -> "VALIDATION_FAILED";
+                case 400, 405, 411, 413 -> "VALIDATION_FAILED";
                 case 404 -> "NOT_FOUND";
                 case 415 -> "UNSUPPORTED_MEDIA_TYPE";
                 default -> "INTERNAL";

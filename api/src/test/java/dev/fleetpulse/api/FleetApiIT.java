@@ -240,6 +240,31 @@ class FleetApiIT {
         assertEquals("urn:fleetpulse:problem:not-found", b.get("type").asString());
     }
 
+    void assertProblem(HttpResponse<String> res, int status, String code) throws Exception {
+        assertEquals(status, res.statusCode());
+        assertTrue(res.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
+        ContractSchemas.assertApi("Problem", res.body());
+        JsonNode b = JSON.readTree(res.body());
+        assertEquals(code, b.get("code").asString());
+        assertEquals("urn:fleetpulse:problem:" + code.toLowerCase().replace('_', '-'), b.get("type").asString());
+        assertTrue(!res.body().contains("Exception") && !res.body().contains("\tat "));
+    }
+
+    HttpResponse<String> send(String method, String path, HttpRequest.BodyPublisher body) throws Exception {
+        return HTTP.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).method(method, body).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void methodBodySizeAndLengthErrorsAreProblems() throws Exception {
+        assertProblem(send("POST", "/api/v1/devices", HttpRequest.BodyPublishers.ofString("{}")), 405, "VALIDATION_FAILED");
+        assertProblem(send("DELETE", "/api/v1/fleet/summary", HttpRequest.BodyPublishers.noBody()), 405, "VALIDATION_FAILED");
+        assertProblem(send("POST", "/api/v1/devices", HttpRequest.BodyPublishers.ofString("x".repeat(65537))), 413, "VALIDATION_FAILED");
+        assertEquals(405, send("POST", "/api/v1/devices", HttpRequest.BodyPublishers.ofString("x".repeat(65536))).statusCode());
+        var chunked = HttpRequest.BodyPublishers.fromPublisher(HttpRequest.BodyPublishers.ofString("{}"));
+        assertProblem(send("POST", "/api/v1/devices", chunked), 411, "VALIDATION_FAILED");
+    }
+
     @Test
     void serverErrorHidesInternals() throws Exception {
         exec("REVOKE SELECT ON state_transition FROM fleetpulse_api");
