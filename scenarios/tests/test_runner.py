@@ -10,12 +10,12 @@ import run  # noqa: E402
 
 class RunnerTests(unittest.TestCase):
     def test_bad_ids_exit_2(self):
-        for bad in ["S-01; rm -rf /", "S-01 && id", "../S-01", "S-99", "$(id)", "s-01", ""]:
+        for bad in ["warm-start; rm -rf /", "warm-start && id", "../warm-start", "nope", "$(id)", "Warm-Start", "a", "x" * 40, ""]:
             self.assertEqual(run.main(["run.py", "run", bad]), 2, bad)
 
     def test_bad_usage_exit_2(self):
         self.assertEqual(run.main(["run.py", "run"]), 2)
-        self.assertEqual(run.main(["run.py", "nope", "S-01"]), 2)
+        self.assertEqual(run.main(["run.py", "nope", "warm-start"]), 2)
 
     def test_flowing_can_fail(self):
         now = datetime.now(timezone.utc)

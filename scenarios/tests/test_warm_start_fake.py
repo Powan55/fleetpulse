@@ -1,4 +1,4 @@
-"""S-01 against a fake stack: proves the checks can pass and can fail."""
+"""Warm start against a fake stack: proves the checks can pass and can fail."""
 import json
 import os
 import sys
@@ -51,7 +51,7 @@ class Fake(BaseHTTPRequestHandler):
         self.reply(404, {})
 
 
-class S01Fake(unittest.TestCase):
+class WarmStartFake(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         ThreadingHTTPServer.request_queue_size = 128
@@ -71,11 +71,11 @@ class S01Fake(unittest.TestCase):
 
     def test_pass(self):
         STATE["dup_page"] = False
-        self.assertEqual(run.main(["run.py", "run", "S-01"]), 0)
+        self.assertEqual(run.main(["run.py", "run", "warm-start"]), 0)
 
     def test_paging_overlap_fails(self):
         STATE["dup_page"] = True
-        self.assertEqual(run.main(["run.py", "run", "S-01"]), 1)
+        self.assertEqual(run.main(["run.py", "run", "warm-start"]), 1)
 
 
 if __name__ == "__main__":

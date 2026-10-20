@@ -1,4 +1,4 @@
-"""S-01: warm start. Data flowing, all services ready, list/filter/paging consistent."""
+"""Warm start: data flowing, all services ready, list, filter and paging consistent."""
 from lib import FLEET, URLS, Checks, Inconclusive, db_query, get_json, http, wait_flowing
 
 NFR_FLOW_S = 120

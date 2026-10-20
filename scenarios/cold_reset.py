@@ -1,4 +1,4 @@
-"""S-02: reset from empty. Run right after `docker compose down -v && docker compose up -d` on the host."""
+"""Reset from empty. Run right after `docker compose down -v && docker compose up -d` on the host."""
 from lib import FLEET, Checks, Inconclusive, db_query, get_json, URLS, wait_flowing
 
 MAX_AGE_S = 600

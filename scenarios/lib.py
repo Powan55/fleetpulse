@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PASS, FAIL, INCONCLUSIVE = 0, 1, 2
-ID_RE = re.compile(r"^S-\d{2}[a-z]?$")
+SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 OUT_DIR = Path(os.environ.get("SCENARIO_OUT", Path(__file__).parent / "out"))
 
 URLS = {
@@ -34,13 +34,17 @@ class Inconclusive(Exception):
     pass
 
 
+CLEANUP = []
+
+
 class Checks:
-    def __init__(self):
+    def __init__(self, label=""):
         self.rows = []
+        self.label = label
 
     def add(self, name, ok, detail=""):
         self.rows.append({"check": name, "ok": bool(ok), "detail": str(detail)})
-        print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"  [{detail}]" if detail else ""))
+        print(f"  {self.label}{'PASS' if ok else 'FAIL'}  {name}" + (f"  [{detail}]" if detail else ""))
         return ok
 
     def note(self, text):
@@ -68,6 +72,14 @@ def http(method, url, body=None, timeout=10):
         raise Inconclusive(f"{url} unreachable: {e}")
 
 
+def sim(method, path, body=None):
+    """Simulator control call. Non-2xx raises Inconclusive."""
+    status, _, raw = http(method, f"{URLS['simulator']}/api/v1{path}", body)
+    if not 200 <= status < 300:
+        raise Inconclusive(f"simulator {method} {path} -> {status} {raw[:200]!r}")
+    return json.loads(raw) if raw else None
+
+
 def get_json(url):
     status, _, body = http("GET", url)
     if status != 200:
@@ -79,12 +91,12 @@ def parse_ts(s):
     return datetime.fromisoformat(s)
 
 
-def db_query(sql):
+def db_query(sql, params=None):
     import psycopg  # lazy: unit tests run without it
 
     try:
         with psycopg.connect(**PG, connect_timeout=5) as conn:
-            return conn.execute(sql).fetchall()
+            return conn.execute(sql, params).fetchall()
     except psycopg.OperationalError as e:
         raise Inconclusive(f"postgres unreachable as {PG['user']}: {e}")
 
