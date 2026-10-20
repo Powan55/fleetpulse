@@ -71,6 +71,33 @@ class FleetTest {
     }
 
     @Test
+    void typeEventIdAndPayloadPerSeqIgnoreTimerJitter() {
+        Fleet a = fleet(25, 7);
+        a.tick(40 * SEC);
+        Map<String, String> first = bySeq(sent);
+        sent.clear();
+        Fleet b = fleet(25, 7);
+        long t = 0;
+        java.util.Random jitter = new java.util.Random(99);
+        while (t < 40 * SEC) {
+            t = Math.min(40 * SEC, t + 1 + (long) (jitter.nextDouble() * 700_000_000L));
+            b.tick(t);
+        }
+        Map<String, String> second = bySeq(sent);
+        assertTrue(first.size() > 900);
+        assertEquals(first, second);
+    }
+
+    private static Map<String, String> bySeq(List<Sent> sent) {
+        Map<String, String> m = new HashMap<>();
+        for (Sent s : sent) {
+            String body = s.value().replaceFirst("\"event_time\":\"[^\"]*\",", "");
+            m.put(s.key() + "#" + find(SEQ, s.value()), body);
+        }
+        return m;
+    }
+
+    @Test
     void differentSeedChangesEvents() {
         Fleet a = fleet(3, 1);
         a.tick(5 * SEC);

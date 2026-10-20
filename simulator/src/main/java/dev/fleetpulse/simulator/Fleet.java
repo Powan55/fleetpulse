@@ -48,6 +48,7 @@ class Fleet implements SmartLifecycle {
     private volatile long[] skewMs;
     private volatile boolean paused;
     private boolean reschedule;
+    private long lastTick;
     private ScheduledExecutorService exec;
 
     Fleet(SimProperties props, KafkaTemplate<String, String> kafka) {
@@ -186,21 +187,27 @@ class Fleet implements SmartLifecycle {
                     return;
                 }
                 if (reschedule) {
-                    schedule(now);
+                    long shift = now - lastTick;
+                    for (int i = 0; i < nextHb.length; i++) {
+                        nextHb[i] += shift;
+                        nextTel[i] += shift;
+                    }
                     reschedule = false;
-                    return;
                 }
+                lastTick = now;
                 for (int i = 0; i < devices.size(); i++) {
                     if (held[i] != null && now - heldAt[i] >= holdNanos) {
                         release(i);
                     }
-                    while (nextHb[i] <= now) {
-                        generate(i, "heartbeat", now);
-                        nextHb[i] += hbNanos;
-                    }
-                    while (nextTel[i] <= now) {
-                        generate(i, "telemetry", now);
-                        nextTel[i] += telNanos;
+                    // Earlier nominal time first (heartbeat on ties), so the type of each seq depends only on the seed.
+                    while (Math.min(nextHb[i], nextTel[i]) <= now) {
+                        if (nextHb[i] <= nextTel[i]) {
+                            generate(i, "heartbeat", now);
+                            nextHb[i] += hbNanos;
+                        } else {
+                            generate(i, "telemetry", now);
+                            nextTel[i] += telNanos;
+                        }
                     }
                 }
             }
