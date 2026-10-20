@@ -12,6 +12,7 @@ management:
     probes.enabled: true
     group.readiness.include: readinessState,db
 fp:
+  retention.telemetry: ${FP_RETENTION_TELEMETRY:15m}
   notify-channel: ${FP_NOTIFY_CHANNEL:fleetpulse_changes}
   sse:
     flush-interval: ${FP_SSE_FLUSH_INTERVAL:250ms}

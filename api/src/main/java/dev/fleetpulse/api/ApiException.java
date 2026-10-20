@@ -19,6 +19,10 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.BAD_REQUEST, "Invalid request parameters", errors);
     }
 
+    static ApiException notFound(String message) {
+        return new ApiException(HttpStatus.NOT_FOUND, message, List.of());
+    }
+
     static ApiException unavailable(String message) {
         return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, message, List.of());
     }

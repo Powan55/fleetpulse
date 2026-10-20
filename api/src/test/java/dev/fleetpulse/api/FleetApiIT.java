@@ -33,6 +33,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -40,6 +41,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "fp.sse.heartbeat-interval=1s")
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class FleetApiIT {
     private static final String API_PASSWORD = "api-test-pw";
     private static final PostgreSQLContainer PG = new PostgreSQLContainer("postgres:18.6");
@@ -171,6 +173,85 @@ class FleetApiIT {
         assertEquals(404, res.statusCode());
         ContractSchemas.assertApi("Problem", res.body());
         assertTrue(!res.body().contains("Exception") && !res.body().contains("\tat "));
+    }
+
+    static void seedDetail() throws SQLException {
+        exec("INSERT INTO device(device_id, state, last_epoch, last_seq, last_seen_at, last_event_time) VALUES "
+                + "('dev-7001','DEGRADED',2,1,now(),now()), ('dev-7002','HEALTHY',1,2,now(),NULL)");
+        exec("INSERT INTO telemetry(device_id, epoch, seq, event_id, event_time, received_at, temperature_c, battery_pct, error_count, replay) "
+                + "SELECT 'dev-7001', 1, g, gen_random_uuid(), now(), now(), 20 + g % 10, 80.5, g % 3, g % 2 = 0 FROM generate_series(1, 460) g");
+        exec("INSERT INTO telemetry VALUES ('dev-7001', 2, 1, gen_random_uuid(), now(), now(), 30, 70, 0, false)");
+        exec("INSERT INTO telemetry VALUES ('dev-7002', 1, 1, gen_random_uuid(), now(), now() - interval '1 hour', 30, 70, 0, false), "
+                + "('dev-7002', 1, 2, gen_random_uuid(), now(), now(), 31, 71, 1, false)");
+        exec("INSERT INTO state_transition(device_id, from_state, to_state, cause, event_id, epoch, seq, event_time) "
+                + "SELECT 'dev-7001', 'HEALTHY', 'DEGRADED', 'telemetry', gen_random_uuid(), 1, g, now() FROM generate_series(1, 59) g");
+        exec("INSERT INTO state_transition(device_id, from_state, to_state, cause) VALUES ('dev-7001', 'DEGRADED', 'OFFLINE', 'offline_sweep')");
+    }
+
+    @Test
+    void deviceDetailMatchesContract() throws Exception {
+        seedDetail();
+        var res = get("/api/v1/devices/dev-7001");
+        assertEquals(200, res.statusCode());
+        ContractSchemas.assertApi("DeviceDetail", res.body());
+        JsonNode body = JSON.readTree(res.body());
+        assertEquals("DEGRADED", body.get("state").asString());
+        assertEquals(2, body.get("lastEpoch").asLong());
+        assertEquals(0, body.get("alerts").size());
+        JsonNode tel = body.get("recentTelemetry");
+        assertEquals(450, tel.size());
+        assertEquals(2, tel.get(0).get("epoch").asLong());
+        assertEquals(460, tel.get(1).get("seq").asLong());
+        assertEquals(1, tel.get(1).get("epoch").asLong());
+        JsonNode hist = body.get("stateHistory");
+        assertEquals(50, hist.size());
+        assertEquals("offline_sweep", hist.get(0).get("cause").asString());
+        assertTrue(hist.get(0).get("id").asLong() > hist.get(1).get("id").asLong());
+
+        JsonNode small = JSON.readTree(get("/api/v1/devices/dev-7001?telemetryLimit=3&historyLimit=200").body());
+        assertEquals(3, small.get("recentTelemetry").size());
+        assertEquals(60, small.get("stateHistory").size());
+
+        JsonNode windowed = JSON.readTree(get("/api/v1/devices/dev-7002").body());
+        assertEquals(1, windowed.get("recentTelemetry").size());
+        assertEquals(2, windowed.get("recentTelemetry").get(0).get("seq").asLong());
+        assertTrue(windowed.get("lastEventTime").isNull());
+        assertEquals(0, windowed.get("stateHistory").size());
+    }
+
+    @Test
+    void deviceDetailRejectsBadInputAndUnknown() throws Exception {
+        for (String p : List.of("dev-7001?telemetryLimit=0", "dev-7001?telemetryLimit=451", "dev-7001?historyLimit=0",
+                "dev-7001?historyLimit=201", "dev-7001?historyLimit=abc", "bogus", "dev-12", "dev-1234567")) {
+            var res = get("/api/v1/devices/" + p);
+            assertEquals(400, res.statusCode(), p);
+            assertTrue(res.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"), p);
+            ContractSchemas.assertApi("Problem", res.body());
+            JsonNode b = JSON.readTree(res.body());
+            assertEquals("VALIDATION_FAILED", b.get("code").asString());
+            assertEquals("urn:fleetpulse:problem:validation-failed", b.get("type").asString());
+        }
+        var res = get("/api/v1/devices/dev-8888");
+        assertEquals(404, res.statusCode());
+        assertTrue(res.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
+        ContractSchemas.assertApi("Problem", res.body());
+        JsonNode b = JSON.readTree(res.body());
+        assertEquals("NOT_FOUND", b.get("code").asString());
+        assertEquals("urn:fleetpulse:problem:not-found", b.get("type").asString());
+    }
+
+    @Test
+    void serverErrorHidesInternals() throws Exception {
+        exec("REVOKE SELECT ON state_transition FROM fleetpulse_api");
+        try {
+            var res = get("/api/v1/devices/dev-0001");
+            assertEquals(500, res.statusCode());
+            ContractSchemas.assertApi("Problem", res.body());
+            assertEquals("INTERNAL", JSON.readTree(res.body()).get("code").asString());
+            assertTrue(!res.body().contains("state_transition") && !res.body().contains("SQL") && !res.body().contains("\tat "));
+        } finally {
+            exec("GRANT SELECT ON state_transition TO fleetpulse_api");
+        }
     }
 
     @Test
