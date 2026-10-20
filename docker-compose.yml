@@ -230,7 +230,9 @@ services:
     <<: *hardened
     build: ./scenarios
     profiles: ["tools"]
-    user: "0"
+    user: "10001"
+    group_add:
+      - "0"
     restart: "no"
     mem_limit: 512m
     cpus: 1.0
