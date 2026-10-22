@@ -19,6 +19,8 @@ sim:
   heartbeat-interval: 2s
   telemetry-interval: 2s
   reorder-hold: 1s
+  buffer-capacity: 400
+  max-send-rate: 2000
 
 management:
   endpoints:

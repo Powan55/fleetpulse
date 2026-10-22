@@ -33,14 +33,31 @@ class FleetTest {
 
     private final List<Sent> sent = new ArrayList<>();
 
-    @SuppressWarnings("unchecked")
+    private boolean failSends;
+
+    List<Sent> sent() {
+        return sent;
+    }
+
+    void failSends(boolean on) {
+        failSends = on;
+    }
+
     private Fleet fleet(int devices, long seed) {
+        return fleet(devices, seed, 400);
+    }
+
+    @SuppressWarnings("unchecked")
+    Fleet fleet(int devices, long seed, int cap) {
         KafkaTemplate<String, String> kafka = mock(KafkaTemplate.class);
         when(kafka.send(anyString(), anyString(), anyString())).thenAnswer(inv -> {
+            if (failSends) {
+                return CompletableFuture.failedFuture(new RuntimeException("down"));
+            }
             sent.add(new Sent(inv.getArgument(1), inv.getArgument(2)));
             return CompletableFuture.completedFuture(null);
         });
-        Fleet f = new Fleet(new SimProperties("t", devices, seed, 1000L, Duration.ofSeconds(2), Duration.ofSeconds(2), Duration.ofSeconds(1)),
+        Fleet f = new Fleet(new SimProperties("t", devices, seed, 1000L, Duration.ofSeconds(2), Duration.ofSeconds(2), Duration.ofSeconds(1), cap, 2000),
                 kafka);
         f.init(0);
         return f;
@@ -114,7 +131,7 @@ class FleetTest {
         f.setChaos(MIXED);
         f.tick(30 * SEC);
         f.setPaused(true);
-        Map<String, Object> c = f.counters.view(f.ledger.total());
+        Map<String, Object> c = f.counters.view(f.ledger.total(), 0);
         long generated = (long) c.get("generated");
         long accepted = (long) c.get("accepted");
         assertEquals(generated, accepted + (long) c.get("dropped") + (long) c.get("bufferOverflow")

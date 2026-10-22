@@ -11,7 +11,9 @@ public record SimProperties(
         Long epoch,
         Duration heartbeatInterval,
         Duration telemetryInterval,
-        Duration reorderHold) {
+        Duration reorderHold,
+        Integer bufferCapacity,
+        Integer maxSendRate) {
 
     public SimProperties {
         if (topic == null || topic.isBlank()) {
@@ -31,6 +33,18 @@ public record SimProperties(
         }
         if (reorderHold.toMillis() < 1) {
             throw new IllegalArgumentException("sim.reorder-hold must be >= 1ms");
+        }
+        if (bufferCapacity == null) {
+            bufferCapacity = 400;
+        }
+        if (bufferCapacity < 1) {
+            throw new IllegalArgumentException("sim.buffer-capacity must be >= 1");
+        }
+        if (maxSendRate == null) {
+            maxSendRate = 2000;
+        }
+        if (maxSendRate < 1) {
+            throw new IllegalArgumentException("sim.max-send-rate must be >= 1");
         }
         if (epoch != null && epoch < 1) {
             throw new IllegalArgumentException("sim.epoch must be positive");
