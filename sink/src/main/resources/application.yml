@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: sink
+
+sink:
+  payload-limit: 10000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
