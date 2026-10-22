@@ -28,7 +28,9 @@ The default stack publishes only the web UI on 127.0.0.1:8080. To reach the api 
 docker compose -f docker-compose.yml -f compose.debug.yml up -d
 ```
 
-That binds the api to 127.0.0.1:8084 and the simulator to 127.0.0.1:8082 (override with `FP_DEBUG_API_PORT` and `FP_DEBUG_SIM_PORT`). Those ports skip the Host check nginx does on 8080, so use the override only on a machine you trust.
+That binds the api to 127.0.0.1:8084, the simulator to 127.0.0.1:8082 and the webhook sink to 127.0.0.1:8083 (override with `FP_DEBUG_API_PORT`, `FP_DEBUG_SIM_PORT` and `FP_DEBUG_SINK_PORT`). Those ports skip the Host check nginx does on 8080, so use the override only on a machine you trust.
+
+The sink is a mock webhook receiver that keeps what it received in memory. Don't stop or recreate it mid-run, the received keys are lost; use its outage mode instead.
 
 ## Scenarios
 

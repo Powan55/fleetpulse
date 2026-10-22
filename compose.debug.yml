@@ -6,3 +6,6 @@ services:
   simulator:
     ports:
       - "127.0.0.1:${FP_DEBUG_SIM_PORT:-8082}:8080"
+  sink:
+    ports:
+      - "127.0.0.1:${FP_DEBUG_SINK_PORT:-8083}:8080"
