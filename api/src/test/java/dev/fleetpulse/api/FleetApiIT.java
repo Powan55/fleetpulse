@@ -342,6 +342,270 @@ class FleetApiIT {
         }
     }
 
+    static int nextDev = 5000;
+
+    static synchronized long newAlert(String status) throws SQLException {
+        String dev = "dev-%04d".formatted(nextDev++);
+        String extra = status.equals("RESOLVED") ? ", resolved_at, resolved_by" : "";
+        String vals = status.equals("RESOLVED") ? ", now(), 'auto'" : "";
+        return Long.parseLong(scalar("INSERT INTO alert(device_id, rule_id, status" + extra + ") VALUES ('" + dev
+                + "','temperature_high','" + status + "'" + vals + ") RETURNING alert_id"));
+    }
+
+    HttpResponse<String> post(String path, String contentType, String body) throws Exception {
+        var b = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).POST(HttpRequest.BodyPublishers.ofString(body));
+        if (contentType != null) b.header("Content-Type", contentType);
+        return HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    HttpResponse<String> postJson(String path, String body) throws Exception {
+        return post(path, "application/json", body);
+    }
+
+    static long outboxRows(long alertId) throws SQLException {
+        return Long.parseLong(scalar("SELECT count(*) FROM outbox WHERE alert_id=" + alertId));
+    }
+
+    @Test
+    void alertListGetAndFilters() throws Exception {
+        long a = newAlert("OPEN");
+        long b = newAlert("ACKED");
+        long c = newAlert("RESOLVED");
+        var res = get("/api/v1/alerts/" + a);
+        assertEquals(200, res.statusCode());
+        ContractSchemas.assertApi("Alert", res.body());
+        JsonNode one = JSON.readTree(res.body());
+        assertEquals("OPEN", one.get("status").asString());
+        assertEquals(1, one.get("version").asInt());
+
+        res = get("/api/v1/alerts?size=200");
+        assertEquals(200, res.statusCode());
+        ContractSchemas.assertApi("AlertPage", res.body());
+        JsonNode page = JSON.readTree(res.body());
+        assertEquals(Long.parseLong(scalar("SELECT count(*) FROM alert")), page.get("totalItems").asLong());
+        List<Long> ids = new ArrayList<>();
+        page.get("items").forEach(i -> ids.add(i.get("alertId").asLong()));
+        assertEquals(ids.stream().sorted(java.util.Comparator.reverseOrder()).toList(), ids);
+
+        res = get("/api/v1/alerts?status=OPEN,ACKED&size=200");
+        ContractSchemas.assertApi("AlertPage", res.body());
+        JsonNode open = JSON.readTree(res.body());
+        assertEquals(Long.parseLong(scalar("SELECT count(*) FROM alert WHERE status IN ('OPEN','ACKED')")), open.get("totalItems").asLong());
+        open.get("items").forEach(i -> assertTrue(!i.get("status").asString().equals("RESOLVED")));
+        assertTrue(open.get("items").toString().contains("\"alertId\":" + b));
+        assertTrue(!open.get("items").toString().contains("\"alertId\":" + c));
+
+        String dev = scalar("SELECT device_id FROM alert WHERE alert_id=" + a);
+        res = get("/api/v1/alerts?deviceId=" + dev + "&ruleId=temperature_high&status=OPEN");
+        assertEquals(1, JSON.readTree(res.body()).get("totalItems").asInt());
+        assertEquals(0, JSON.readTree(get("/api/v1/alerts?ruleId=battery_low").body()).get("totalItems").asInt());
+        assertEquals(1, JSON.readTree(get("/api/v1/alerts?size=1&page=0").body()).get("items").size());
+    }
+
+    @Test
+    void alertBadParamsAndUnknownIds() throws Exception {
+        for (String q : List.of("status=BOGUS", "status=", "status=OPEN,", "deviceId=x", "ruleId=nope",
+                "size=0", "size=201", "page=-1", "page=10001")) {
+            var res = get("/api/v1/alerts?" + q);
+            assertEquals(400, res.statusCode(), q);
+            assertTrue(res.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"), q);
+            ContractSchemas.assertApi("Problem", res.body());
+        }
+        for (String id : List.of("abc", "0", "-3", "99999999999999999999")) {
+            assertEquals(400, get("/api/v1/alerts/" + id).statusCode(), id);
+            assertEquals(400, postJson("/api/v1/alerts/" + id + "/ack", "{}").statusCode(), id);
+        }
+        for (String path : List.of("/api/v1/alerts/987654", "/api/v1/alerts/987654/ack", "/api/v1/alerts/987654/resolve")) {
+            var res = path.endsWith("987654") ? get(path) : postJson(path, "{}");
+            assertEquals(404, res.statusCode(), path);
+            ContractSchemas.assertApi("Problem", res.body());
+            assertEquals("NOT_FOUND", JSON.readTree(res.body()).get("code").asString());
+        }
+    }
+
+    @Test
+    void ackTwiceMakesOneTransitionAndOneOutboxRow() throws Exception {
+        long id = newAlert("OPEN");
+        var res = postJson("/api/v1/alerts/" + id + "/ack", "{\"note\":\"on it\"}");
+        assertEquals(200, res.statusCode());
+        ContractSchemas.assertApi("Alert", res.body());
+        JsonNode first = JSON.readTree(res.body());
+        assertEquals("ACKED", first.get("status").asString());
+        assertEquals(2, first.get("version").asInt());
+        assertNotNull(first.get("ackedAt").asString());
+
+        var again = postJson("/api/v1/alerts/" + id + "/ack", "{}");
+        assertEquals(200, again.statusCode());
+        assertEquals(res.body(), again.body());
+        assertEquals(1, outboxRows(id));
+        assertEquals("alert-" + id + "-acked", scalar("SELECT idempotency_key FROM outbox WHERE alert_id=" + id));
+        assertEquals("2", scalar("SELECT alert_version FROM outbox WHERE alert_id=" + id));
+        assertEquals("PENDING", scalar("SELECT status FROM outbox WHERE alert_id=" + id));
+        String payload = scalar("SELECT payload::text FROM outbox WHERE alert_id=" + id);
+        ContractSchemas.assertWebhook(payload);
+        JsonNode p = JSON.readTree(payload);
+        assertEquals("acked", p.get("transition").asString());
+        assertEquals("ACKED", p.get("status").asString());
+        assertEquals(first.get("ackedAt").asString(), p.get("ackedAt").asString());
+        assertEquals(first.get("updatedAt").asString(), p.get("occurredAt").asString());
+    }
+
+    @Test
+    void manualResolveWritesOneOutboxRowAndRefusesSecondCall() throws Exception {
+        long open = newAlert("OPEN");
+        var res = postJson("/api/v1/alerts/" + open + "/resolve", "{}");
+        assertEquals(200, res.statusCode());
+        ContractSchemas.assertApi("Alert", res.body());
+        JsonNode r = JSON.readTree(res.body());
+        assertEquals("RESOLVED", r.get("status").asString());
+        assertEquals("operator", r.get("resolvedBy").asString());
+        assertEquals(2, r.get("version").asInt());
+        assertEquals(1, outboxRows(open));
+        ContractSchemas.assertWebhook(scalar("SELECT payload::text FROM outbox WHERE alert_id=" + open));
+        assertEquals("alert-" + open + "-resolved", scalar("SELECT idempotency_key FROM outbox WHERE alert_id=" + open));
+
+        for (String action : List.of("resolve", "ack")) {
+            var conflict = postJson("/api/v1/alerts/" + open + "/" + action, "{}");
+            assertEquals(409, conflict.statusCode(), action);
+            assertTrue(conflict.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
+            ContractSchemas.assertApi("Problem", conflict.body());
+            JsonNode prob = JSON.readTree(conflict.body());
+            assertEquals("ALERT_RESOLVED", prob.get("code").asString());
+            assertEquals("RESOLVED", prob.get("alert").get("status").asString());
+            assertEquals(2, prob.get("alert").get("version").asInt());
+        }
+        assertEquals(1, outboxRows(open));
+        assertEquals("2", scalar("SELECT version FROM alert WHERE alert_id=" + open));
+
+        long acked = newAlert("OPEN");
+        postJson("/api/v1/alerts/" + acked + "/ack", "{}");
+        var res2 = postJson("/api/v1/alerts/" + acked + "/resolve", "{}");
+        assertEquals(3, JSON.readTree(res2.body()).get("version").asInt());
+        assertEquals("2", scalar("SELECT count(*) FROM outbox WHERE alert_id=" + acked));
+        assertEquals("3", scalar("SELECT max(alert_version) FROM outbox WHERE alert_id=" + acked));
+    }
+
+    @Test
+    void postsNeedAJsonBody() throws Exception {
+        long id = newAlert("OPEN");
+        String path = "/api/v1/alerts/" + id + "/ack";
+        for (var req : List.of(
+                post(path, "application/x-www-form-urlencoded", ""),
+                post(path, "application/x-www-form-urlencoded", "a=b"),
+                post(path, "text/plain", "{}"),
+                post(path, null, "{}"),
+                post(path, "application/json", ""))) {
+            assertEquals(415, req.statusCode());
+            assertTrue(req.headers().firstValue("content-type").orElse("").startsWith("application/problem+json"));
+            ContractSchemas.assertApi("Problem", req.body());
+            assertEquals("UNSUPPORTED_MEDIA_TYPE", JSON.readTree(req.body()).get("code").asString());
+        }
+        assertEquals(415, post("/api/v1/alerts/" + id + "/resolve", "application/x-www-form-urlencoded", "").statusCode());
+        for (String bad : List.of("[]", "\"x\"", "null", "{", "{} {}", "{\"extra\":1}", "{\"note\":5}", "{\"note\":\"" + "x".repeat(201) + "\"}",
+                "{\"note\":\"a\",\"note\":\"b\"}")) {
+            var res = postJson(path, bad);
+            assertEquals(400, res.statusCode(), bad);
+            ContractSchemas.assertApi("Problem", res.body());
+        }
+        assertEquals(413, postJson(path, "{\"note\":\"" + "x".repeat(70000) + "\"}").statusCode());
+        assertEquals("OPEN", scalar("SELECT status FROM alert WHERE alert_id=" + id));
+        assertEquals(0, outboxRows(id));
+        assertEquals(200, postJson(path, "{\"note\":\"" + "x".repeat(200) + "\"}").statusCode());
+    }
+
+    @Test
+    void ackIsAtomicWithOutboxInsert() throws Exception {
+        long id = newAlert("OPEN");
+        exec("REVOKE INSERT ON outbox FROM fleetpulse_api");
+        try {
+            var res = postJson("/api/v1/alerts/" + id + "/ack", "{}");
+            assertEquals(500, res.statusCode());
+            assertTrue(!res.body().contains("outbox") && !res.body().contains("\tat "));
+        } finally {
+            exec("GRANT INSERT ON outbox TO fleetpulse_api");
+        }
+        assertEquals("OPEN", scalar("SELECT status FROM alert WHERE alert_id=" + id));
+        assertEquals("1", scalar("SELECT version FROM alert WHERE alert_id=" + id));
+        assertEquals(200, postJson("/api/v1/alerts/" + id + "/ack", "{}").statusCode());
+    }
+
+    @Test
+    void concurrentAcksMakeOneTransition() throws Exception {
+        long id = newAlert("OPEN");
+        List<java.util.concurrent.Future<Integer>> fs = new ArrayList<>();
+        try (var pool = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            for (int i = 0; i < 8; i++) fs.add(pool.submit(() -> postJson("/api/v1/alerts/" + id + "/ack", "{}").statusCode()));
+            for (var f : fs) assertEquals(200, f.get());
+        }
+        assertEquals(1, outboxRows(id));
+        assertEquals("2", scalar("SELECT version FROM alert WHERE alert_id=" + id));
+    }
+
+    @Test
+    void apiRoleCannotTouchAlertIdentityColumns() throws Exception {
+        long id = newAlert("OPEN");
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), "fleetpulse_api", API_PASSWORD); Statement s = c.createStatement()) {
+            assertThrows(SQLException.class, () -> s.execute("UPDATE alert SET device_id='dev-0001' WHERE alert_id=" + id));
+            assertThrows(SQLException.class, () -> s.execute("DELETE FROM alert WHERE alert_id=" + id));
+            assertThrows(SQLException.class, () -> s.execute("UPDATE outbox SET status='DEAD'"));
+        }
+    }
+
+    @Test
+    void deviceDetailListsItsAlerts() throws Exception {
+        long id = newAlert("OPEN");
+        String dev = scalar("SELECT device_id FROM alert WHERE alert_id=" + id);
+        exec("INSERT INTO device(device_id, state, last_epoch, last_seq, last_seen_at) VALUES ('" + dev + "','FAILED',1,1,now())");
+        exec("INSERT INTO alert(device_id, rule_id, status, backfilled, resolved_at, resolved_by) VALUES ('" + dev
+                + "','battery_low','RESOLVED', true, now(), 'auto')");
+        var res = get("/api/v1/devices/" + dev);
+        assertEquals(200, res.statusCode());
+        ContractSchemas.assertApi("DeviceDetail", res.body());
+        JsonNode alerts = JSON.readTree(res.body()).get("alerts");
+        assertEquals(2, alerts.size());
+        assertEquals("battery_low", alerts.get(0).get("ruleId").asString());
+        assertTrue(alerts.get(0).get("backfilled").asBoolean());
+        assertEquals(id, alerts.get(1).get("alertId").asLong());
+    }
+
+    @Test
+    void streamSendsAlertChangesWithIncreasingVersions() throws Exception {
+        long id = newAlert("OPEN");
+        try (Sse sse = new Sse()) {
+            sse.next("hello");
+            notifyAlerts(id);
+            JsonNode opened = alertEvent(sse, id);
+            assertEquals(1, opened.get("version").asInt());
+
+            assertEquals(200, postJson("/api/v1/alerts/" + id + "/ack", "{}").statusCode());
+            JsonNode acked = alertEvent(sse, id);
+            assertEquals("ACKED", acked.get("status").asString());
+            assertEquals(2, acked.get("version").asInt());
+
+            assertEquals(200, postJson("/api/v1/alerts/" + id + "/resolve", "{}").statusCode());
+            JsonNode resolved = alertEvent(sse, id);
+            assertEquals("RESOLVED", resolved.get("status").asString());
+            assertEquals(3, resolved.get("version").asInt());
+        }
+    }
+
+    static void notifyAlerts(long... ids) throws SQLException {
+        exec("SELECT pg_notify('fleetpulse_changes', '{\"t\":\"a\",\"ids\":[" + java.util.Arrays.stream(ids).mapToObj(Long::toString)
+                .collect(java.util.stream.Collectors.joining(",")) + "]}')");
+    }
+
+    JsonNode alertEvent(Sse sse, long id) throws Exception {
+        for (int i = 0; i < 20; i++) {
+            Event e = sse.next("alerts");
+            ContractSchemas.assertSse("alerts", e.data);
+            for (JsonNode item : JSON.readTree(e.data).get("items")) {
+                ContractSchemas.assertApi("Alert", item.toString());
+                if (item.get("alertId").asLong() == id) return item;
+            }
+        }
+        throw new AssertionError("no alerts event for " + id);
+    }
+
     record Event(String name, String data) {}
 
     final class Sse implements AutoCloseable {

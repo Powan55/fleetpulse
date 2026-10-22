@@ -37,6 +37,11 @@ final class ContractSchemas {
         check(REGISTRY.getSchema(schema.toString(), InputFormat.JSON), name, data);
     }
 
+    /** Validates an outbox payload against the webhook schema. */
+    static void assertWebhook(String body) throws Exception {
+        check(REGISTRY.getSchema(Files.readString(CONTRACTS.resolve("webhook.schema.json")), InputFormat.JSON), "webhook", body);
+    }
+
     private static void check(Schema schema, String name, String body) {
         var errors = schema.validate(body, InputFormat.JSON);
         assertTrue(errors.isEmpty(), name + " invalid: " + errors + " body=" + body);

@@ -8,6 +8,7 @@ public class ApiException extends RuntimeException {
 
     final HttpStatus status;
     final List<FieldError> errors;
+    Dto.Alert alert;
 
     ApiException(HttpStatus status, String message, List<FieldError> errors) {
         super(message);
@@ -21,6 +22,16 @@ public class ApiException extends RuntimeException {
 
     static ApiException notFound(String message) {
         return new ApiException(HttpStatus.NOT_FOUND, message, List.of());
+    }
+
+    static ApiException unsupportedMedia(String message) {
+        return new ApiException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, message, List.of());
+    }
+
+    static ApiException resolved(Dto.Alert alert) {
+        ApiException e = new ApiException(HttpStatus.CONFLICT, "Alert is already resolved", List.of());
+        e.alert = alert;
+        return e;
     }
 
     static ApiException unavailable(String message) {

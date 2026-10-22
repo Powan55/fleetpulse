@@ -13,7 +13,7 @@ class NotifyAndHubTest {
     @Test
     void acceptsDeviceAndAlertPayloads() {
         assertEquals(List.of("dev-0001", "dev-0002"), ChangeListener.parse("{\"t\":\"d\",\"ids\":[\"dev-0001\",\"dev-0002\"]}").devices());
-        assertEquals(List.of(), ChangeListener.parse("{\"t\":\"a\",\"ids\":[17,18]}").devices());
+        assertEquals(List.of(17L, 18L), ChangeListener.parse("{\"t\":\"a\",\"ids\":[17,18]}").alerts());
     }
 
     @Test
@@ -32,7 +32,7 @@ class NotifyAndHubTest {
 
     @Test
     void capsOpenStreams() throws Exception {
-        StreamHub hub = new StreamHub(null, 2000, 2);
+        StreamHub hub = new StreamHub(null, null, 2000, 2);
         hub.register();
         hub.register();
         ApiException e = assertThrows(ApiException.class, hub::register);
