@@ -90,9 +90,15 @@ class StateMachineTest {
     void offlineLeavesOnAnyEventAndResetsCounters() {
         Dev off = new Dev("OFFLINE", 0, 0, 0);
         assertThat(StateMachine.onEvent(off)).isEqualTo(new Dev("RECOVERING", 0, 0, 0));
-        assertThat(StateMachine.onSample(R, off, Rules.OK)).isEqualTo(new Dev("RECOVERING", 0, 0, 0));
+        assertThat(StateMachine.onSample(R, off, Rules.OK)).isEqualTo(new Dev("RECOVERING", 0, 0, 1));
+        assertThat(StateMachine.onSample(R, off, Rules.DEGRADED)).isEqualTo(new Dev("RECOVERING", 1, 0, 0));
+        assertThat(StateMachine.onSample(R, off, Rules.FAILED)).isEqualTo(new Dev("RECOVERING", 1, 1, 0));
         assertThat(StateMachine.onEvent(Dev.fresh())).isEqualTo(Dev.fresh());
         assertThat(run(StateMachine.onEvent(off), Rules.OK, 5).state()).isEqualTo("HEALTHY");
+        assertThat(run(StateMachine.onEvent(off), Rules.OK, 4).state()).isEqualTo("RECOVERING");
+        Dev trig = StateMachine.onSample(R, off, Rules.OK);
+        assertThat(run(trig, Rules.OK, 3).state()).isEqualTo("RECOVERING");
+        assertThat(run(trig, Rules.OK, 4).state()).isEqualTo("HEALTHY");
     }
 
     // The densest loop: RECOVERING -> DEGRADED -> FAILED -> RECOVERING is at most 3 transitions per 22 samples.

@@ -20,13 +20,14 @@ final class StateMachine {
 
     private StateMachine() {}
 
-    /** OFFLINE leaves on any in-order event; the event itself is not counted as a sample. */
+    /** OFFLINE leaves on any in-order event. A heartbeat is not a sample (counters 0); a telemetry event counts as the first sample (see onSample). */
     static Dev onEvent(Dev d) {
         return "OFFLINE".equals(d.state()) ? new Dev("RECOVERING", 0, 0, 0) : d;
     }
 
     static Dev onSample(Rules r, Dev d, int severity) {
-        if ("OFFLINE".equals(d.state())) return onEvent(d);
+        if ("OFFLINE".equals(d.state()))
+            return new Dev("RECOVERING", severity >= Rules.DEGRADED ? 1 : 0, severity == Rules.FAILED ? 1 : 0, severity == Rules.OK ? 1 : 0);
         int bad = severity >= Rules.DEGRADED ? Math.min(d.bad() + 1, CAP) : 0;
         int fail = severity == Rules.FAILED ? Math.min(d.fail() + 1, CAP) : 0;
         int ok = severity == Rules.OK ? Math.min(d.ok() + 1, CAP) : 0;
