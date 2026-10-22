@@ -1,0 +1,40 @@
+# FleetPulse alert and severity rules. Format spec and default values.
+# The processor loads FP_RULES_FILE at startup (default: classpath rules.yaml, a copy of this file).
+# Rules are static: no runtime editing. An invalid file stops the processor from starting (readiness never UP).
+# Hysteresis counts telemetry samples in seq order, not wall-clock time, so a replayed burst behaves like live data.
+version: 1
+
+hysteresis:
+  enter_samples: 3        # consecutive breaching samples to worsen state / open a metric alert (6 s at one sample per 2 s)
+  exit_samples: 5         # consecutive clear samples to improve state / auto-resolve a metric alert
+  recover_samples: 5      # consecutive OK samples in RECOVERING to reach HEALTHY
+  state_rule_reopen_after: 6s   # state rules only: re-open delay after a manual resolve while the state persists
+
+# Per-sample severity. A sample's severity = worst over metrics. Bounds inclusive.
+severity:
+  temperature_c: { degraded: { gte: 70 }, failed: { gte: 85 } }
+  battery_pct:   { degraded: { lte: 20 }, failed: { lte: 5 } }
+  error_count:   { degraded: { gte: 5 },  failed: { gte: 20 } }
+
+rules:
+  - id: temperature_high
+    kind: metric            # evaluated per in-order telemetry sample with enter/exit_samples
+    metric: temperature_c
+    op: gte                 # gte | lte
+    threshold: 70
+  - id: battery_low
+    kind: metric
+    metric: battery_pct
+    op: lte
+    threshold: 20
+  - id: error_burst
+    kind: metric
+    metric: error_count
+    op: gte
+    threshold: 5
+  - id: device_offline
+    kind: state             # open on entering state, auto-resolve on leaving it
+    state: OFFLINE
+  - id: device_failed
+    kind: state
+    state: FAILED

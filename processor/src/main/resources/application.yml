@@ -32,4 +32,25 @@ fp:
     inbox: ${FP_RETENTION_INBOX:30m}
     telemetry: ${FP_RETENTION_TELEMETRY:15m}
     late: ${FP_RETENTION_LATE:1h}
+    history: ${FP_RETENTION_HISTORY:7d}
+    alerts: ${FP_RETENTION_ALERTS:7d}
+    outbox-delivered: ${FP_RETENTION_OUTBOX_DELIVERED:24h}
     interval: ${FP_RETENTION_INTERVAL:60s}
+  rules-file: ${FP_RULES_FILE:}
+  sweep:
+    offline-timeout: ${FP_OFFLINE_TIMEOUT:10s}
+    interval: ${FP_SWEEP_INTERVAL:1s}
+    max-lag: ${FP_SWEEP_MAX_LAG:1000}
+    grace: ${FP_SWEEP_GRACE:10s}
+  test-hooks:
+    enabled: ${FP_TEST_HOOKS_ENABLED:false}
+    auto-resume: 300s
+  webhook:
+    sink-url: ${FP_SINK_URL:http://sink:8080/webhooks/alerts}
+    timeout: ${FP_WEBHOOK_TIMEOUT:5s}
+    max-attempts: ${FP_WEBHOOK_MAX_ATTEMPTS:20}
+    backoff-base: ${FP_WEBHOOK_BACKOFF_BASE:1s}
+    backoff-max: ${FP_WEBHOOK_BACKOFF_MAX:30s}
+    jitter: ${FP_WEBHOOK_JITTER:0.2}
+    concurrency: ${FP_WEBHOOK_CONCURRENCY:10}
+    poll-interval: ${FP_OUTBOX_POLL_INTERVAL:250ms}
