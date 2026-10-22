@@ -103,8 +103,8 @@ def load_window(epoch, since, t_cut):
     start = {d: s for d, s in db_query("SELECT DISTINCT ON (device_id) device_id, to_state FROM state_transition WHERE occurred_at < %s ORDER BY device_id, id DESC", (since,))}
     al = defaultdict(list)
     for dev, rule, status, by, back, trig, aid in db_query(
-        "SELECT device_id, rule_id, status, resolved_by, backfilled, trigger_event_id, alert_id FROM alert WHERE opened_at >= %s AND opened_at <= %s ORDER BY alert_id",
-        (since, t_cut),
+        "SELECT device_id, rule_id, CASE WHEN resolved_at > %s THEN 'OPEN' ELSE status END, resolved_by, backfilled, trigger_event_id, alert_id FROM alert WHERE opened_at >= %s AND opened_at <= %s ORDER BY alert_id",
+        (t_cut, since, t_cut),
     ):
         al[dev].append((rule, status, by, back, None if trig is None else str(trig), aid))
     return {"events": ev, "transitions": tr, "start": start, "alerts": al, "window_s": (t_cut - since).total_seconds()}

@@ -60,7 +60,7 @@ class Probe(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.devices, self.alerts, self.seen, self.errors = {}, {}, Counter(), []
-        self.ready, self.conn = threading.Event(), None
+        self.ready, self.conn, self.errors_ended = threading.Event(), None, None
 
     def run(self):
         u = urlparse(URLS["api"])
@@ -73,8 +73,9 @@ class Probe(threading.Thread):
                 return
             name, data = None, []
             while True:
-                line = r.fp.readline()
+                line = r.readline()
                 if not line:
+                    self.errors_ended = "stream ended by server"
                     return
                 line = line.decode().rstrip("\r\n")
                 if line.startswith("event:"):
@@ -82,11 +83,18 @@ class Probe(threading.Thread):
                 elif line.startswith("data:"):
                     data.append(line[5:].strip())
                 elif line == "" and name:
-                    self.handle(name, json.loads("".join(data)))
+                    raw = "".join(data)
+                    try:
+                        parsed = json.loads(raw)
+                    except ValueError as e:
+                        self.errors_ended = f"{e!r} name={name} lines={len(data)} len={len(raw)} around={raw[max(0, e.pos - 80):e.pos + 80]!r} tail={raw[-60:]!r}"
+                        return
+                    self.handle(name, parsed)
                     name, data = None, []
         except (OSError, http.client.HTTPException, ValueError) as e:
             if not self.ready.is_set():
                 self.errors.append(f"stream: {e!r}")
+            self.errors_ended = repr(e)
 
     def handle(self, name, data):
         self.seen[name] += 1
@@ -159,7 +167,9 @@ def run(c: Checks):
         took = time.monotonic() - t0
         times.append(took)
         if not ok:
-            stuck.append((i, f"not converged after {took:.1f} s", differences(p.devices, p.alerts, *rest_state())))
+            rd, ra = rest_state()
+            dd, aa = differences(p.devices, p.alerts, rd, ra)
+            stuck.append((i, f"not converged after {took:.1f} s", len(dd), len(aa), [(d, p.devices.get(d), rd.get(d)) for d in dd[:3]], [(a, p.alerts.get(a), ra.get(a)) for a in aa[:3]], p.errors_ended, dict(p.seen)))
         time.sleep(rnd.uniform(1, 3))
         seen.update(p.seen)
         errors += p.errors
@@ -185,5 +195,5 @@ def run(c: Checks):
 
     ok, _ = poll(settled, 60, 0.5)
     final.drop()
-    c.add("after the faults clear a fresh probe ends on the REST state with every device HEALTHY", ok, "converged" if ok else f"{differences(final.devices, final.alerts, *rest_state())}")
+    c.add("after the faults clear a fresh probe ends on the REST state with every device HEALTHY", ok, "converged" if ok else f"{differences(final.devices, final.alerts, *rest_state())}; probe: {final.errors_ended}, {dict(final.seen)}, alive={final.is_alive()}")
     w.finish(c, None)

@@ -32,7 +32,7 @@ class Db:
             return self.transitions
         if "DISTINCT ON" in sql:
             return []
-        if "SELECT device_id, rule_id, status, resolved_by" in sql:
+        if "SELECT device_id, rule_id, CASE WHEN resolved_at" in sql:
             return self.alerts
         if "LEFT JOIN outbox" in sql:
             return self.outbox_by_alert
