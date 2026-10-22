@@ -79,7 +79,7 @@ stateDiagram-v2
 - Hysteresis counts samples in order, not seconds: 3 bad samples to get worse, 5 good ones to get better. A replayed burst behaves exactly like live data, and clock skew can't affect it. At one sample per 2 s that is about 6 s to raise and 10 s to clear.
 - **Offline**: a device with no new event for 10 s goes OFFLINE. "Last seen" is the broker's append time, not the device clock, so a skewed clock never makes a live device look dead. The sweep runs every second.
 - **No false offline when the processor is behind**: if any Kafka partition has more than 1000 unprocessed records, the sweep skips, and after lag clears it waits another 10 s. Otherwise a processor restart would mark every device OFFLINE while it caught up.
-- **Recovery**: the first event from an OFFLINE device moves it to RECOVERING; 5 OK samples make it HEALTHY.
+- **Recovery**: the first event from an OFFLINE device moves it to RECOVERING. If that event is telemetry, its sample already counts as the first of the 5 OK samples needed for HEALTHY; a heartbeat counts nothing. See [ADR 0005](adr/0005-state-machine-and-hysteresis.md) for an example.
 
 ## Alerts and webhooks
 
