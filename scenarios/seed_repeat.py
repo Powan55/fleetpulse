@@ -35,13 +35,13 @@ def run(c: Checks):
     start = now_ms()
     _boot()
     time.sleep(seconds(30))
-    led1, _, _ = quiesce()
+    led1, *_ = quiesce()
     epoch = led1["epoch"]
     applied1 = _applied(epoch)
     restart = now_ms()
     _boot()
     time.sleep(seconds(30) * 2 // 3)
-    led2, _, _ = quiesce()
+    led2, *_ = quiesce()
     sim("PUT", "/generation", {"paused": False})
     applied2 = _applied(epoch)
     if led2["epoch"] != epoch or led2["seed"] != led1["seed"]:

@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 
-from confluent_kafka import Consumer, ConsumerGroupTopicPartitions, KafkaException, TopicPartition
+from confluent_kafka import Consumer, ConsumerGroupTopicPartitions, KafkaException, Producer, TopicPartition
 from confluent_kafka.admin import AdminClient
 
 from lib import Inconclusive
@@ -133,3 +133,12 @@ def group_lag(topic=TOPIC, group=GROUP, with_end=False):
     wm = watermarks(topic)
     lag = {p: hi - (committed[p] if committed.get(p, -1) >= 0 else lo) for p, (lo, hi) in wm.items()}
     return (lag, sum(hi for _, hi in wm.values())) if with_end else lag
+
+
+def produce(key, value, topic=TOPIC):
+    """Produce one record and wait for the broker ack."""
+    errors = []
+    p = Producer({"bootstrap.servers": BOOT, "acks": "all", "enable.idempotence": True})
+    p.produce(topic, key=key, value=value, on_delivery=lambda err, _m: errors.append(err) if err else None)
+    if p.flush(15) > 0 or errors:
+        raise Inconclusive(f"produce to {topic} failed: {errors or 'timeout'}")

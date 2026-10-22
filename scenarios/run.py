@@ -24,6 +24,20 @@ SCENARIOS = {
     "event-id-unique": "event_ids:run",
     "seed-repeat": "seed_repeat:run",
     "partition-balance": "partitions:run",
+    "processor-downtime": "offline:run_downtime",
+    "replay-old-event": "replay_old:run",
+    "disconnect-replay": "disconnect:run",
+    "disconnect-replay-long": "disconnect:run_long",
+    "buffer-overflow": "disconnect:run_overflow",
+    "clock-skew": "offline:run_skew",
+    "flap-patterns": "flap:run",
+    "fault-latency": "fault_latency:run",
+    "offline-timing": "offline:run_timing",
+    "alert-actions": "alert_actions:run",
+    "sink-outage": "sink_modes:run_outage",
+    "sink-errors": "sink_modes:run_errors",
+    "sink-slow": "sink_modes:run_slow",
+    "sse-resync": "sse:run",
 }
 
 

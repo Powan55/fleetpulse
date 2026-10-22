@@ -4,9 +4,10 @@ import random
 import time
 
 import dock
+import m3
 import topic
 from chaos import Window
-from lib import URLS, Checks, Inconclusive, http
+from lib import URLS, Checks, Inconclusive, http, sim
 
 CAUGHT_UP_RECORDS = 2000
 BOUND_S = 90
@@ -77,7 +78,8 @@ def run_rapid(c: Checks):
     kills = int(os.environ.get("FP_KILLS", 20))
     rnd = random.Random(42)
     w = Window(c)
-    c.note(f"kills={kills} spacing 10-40 s seed=42; the processor duplicate counter does not exist yet, so redelivery is not proven")
+    c.note(f"flap fault (3 bad, 5 good samples) on {len(m3.flap_100())} devices, so alert transactions are in flight when the processor dies")
+    c.note(f"kills={kills} spacing 10-40 s seed=42; the processor duplicate counter is not exported yet, so redelivery is not proven")
     for n in range(1, kills + 1):
         time.sleep(rnd.uniform(10, 40))
         _kill(c, n, False)
@@ -85,4 +87,5 @@ def run_rapid(c: Checks):
     deadline = time.monotonic() + BOUND_S + 60
     while not dock.inspect("processor")["running"] and time.monotonic() < deadline:
         time.sleep(1)
+    sim("DELETE", "/faults")
     w.finish(c, None)
