@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { applyDevices, fromSnapshot, newerSummary, sortedDevices } from './store';
+import { applyAlerts, applyDevices, fromSnapshot, newerSummary, sortedDevices } from './store';
 import { Tile, App } from './App';
 import { DetailView } from './Detail';
-import type { Device, Summary } from './types';
+import { AlertsPage } from './Alerts';
+import type { Alert, Device, Summary } from './types';
 
 const dev = (deviceId: string, stateVersion: number, state: Device['state'] = 'HEALTHY'): Device => ({
   deviceId,
@@ -113,5 +114,56 @@ describe('markup', () => {
     for (const t of ['detail-state', 'detail-last-seq', 'telemetry-row', 'history-row'])
       expect(html).toContain(`data-testid="${t}"`);
     expect(html).toContain('>42<');
+  });
+});
+
+const alert = (alertId: number, version: number, status: Alert['status'] = 'OPEN', backfilled = false): Alert => ({
+  alertId,
+  deviceId: 'dev-0001',
+  ruleId: 'temperature_high',
+  status,
+  version,
+  backfilled,
+  openedAt: '2026-01-01T00:00:00Z',
+  updatedAt: '2026-01-01T00:00:00Z',
+});
+
+describe('alerts', () => {
+  it('drops stale versions, applies newer', () => {
+    const m = applyAlerts(new Map(), [alert(1, 2, 'ACKED')]);
+    expect(applyAlerts(m, [alert(1, 2, 'OPEN'), alert(1, 1, 'OPEN')])).toBe(m);
+    expect(applyAlerts(m, [alert(1, 3, 'RESOLVED')]).get(1)?.status).toBe('RESOLVED');
+  });
+
+  it('list rows have ack and resolve controls, backfilled label', () => {
+    const html = renderToStaticMarkup(
+      <AlertsPage alerts={[alert(7, 1, 'OPEN', true)]} ready onChange={() => {}} />,
+    );
+    for (const t of ['alert-row-7', 'alert-ack-7', 'alert-resolve-7', 'alert-backfilled-7'])
+      expect(html).toContain(`data-testid="${t}"`);
+  });
+
+  it('resolved row has both buttons disabled', () => {
+    const html = renderToStaticMarkup(<AlertsPage alerts={[alert(8, 2, 'RESOLVED')]} ready onChange={() => {}} />);
+    expect(html.match(/disabled=""/g)).toHaveLength(2);
+  });
+
+  it('detail merges live alerts and shows chart', () => {
+    const detail = {
+      ...dev('dev-0001', 1),
+      lastEpoch: 1,
+      lastSeq: 2,
+      recentTelemetry: [1, 2].map((seq) => ({
+        epoch: 1, seq, eventTime: '', receivedAt: '2026-01-01T00:00:00Z', temperatureC: 20 + seq, batteryPct: 90, errorCount: 0, replay: false,
+      })),
+      stateHistory: [],
+      alerts: [alert(5, 1)],
+    };
+    const live = new Map([[5, alert(5, 2, 'ACKED')]]);
+    const html = renderToStaticMarkup(
+      <DetailView id="dev-0001" result={{ ok: true, detail }} onRetry={() => {}} alerts={live} />,
+    );
+    expect(html).toContain('data-testid="telemetry-chart"');
+    expect(html).toContain('>ACKED<');
   });
 });

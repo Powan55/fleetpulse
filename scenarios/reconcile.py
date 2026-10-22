@@ -8,9 +8,12 @@ import threading
 import time
 import uuid
 from collections import Counter
+from datetime import datetime, timezone
 
+import m3checks
+import oracle
 import topic
-from lib import Checks, Inconclusive, db_query, poll, sim
+from lib import Checks, Inconclusive, db_now, db_query, poll, sim, sink
 
 MAX_ROWS = 50
 TAMPER = re.compile(r"^ledger:(dev-[0-9]{4,6}):([+-][0-9]+)$")
@@ -116,17 +119,17 @@ class Monitor(threading.Thread):
 class LagSampler(threading.Thread):
     """Samples total consumer-group lag every 2 s, with a lag-over-ingest-rate age estimate."""
 
-    def __init__(self):
+    def __init__(self, every=2.0):
         super().__init__(daemon=True)
-        self.samples, self._stop_evt = [], threading.Event()
+        self.samples, self._stop_evt, self.every = [], threading.Event(), every
 
     def run(self):
-        while not self._stop_evt.wait(2.0):
+        while not self._stop_evt.wait(self.every):
             try:
                 lag, end = topic.group_lag(with_end=True)
             except Inconclusive:
                 continue
-            self.samples.append((time.monotonic(), sum(lag.values()), end))
+            self.samples.append((time.monotonic(), sum(lag.values()), end, max(lag.values(), default=0)))
 
     def finish(self):
         self._stop_evt.set()
@@ -148,9 +151,16 @@ class LagSampler(threading.Thread):
         return ages[int(0.99 * (len(ages) - 1))] if ages else None
 
 
-def quiesce():
-    """Chaos off, wait for the simulator to drain, pause generation, final ledger, wait for lag 0."""
+def quiesce(t_cut=None):
+    """Chaos off, wait for the simulator to drain, pause generation, final ledger, wait for lag 0 and no pending webhook.
+
+    t_cut = database time before the pause; rows created later (offline sweeps of the paused fleet) are not compared.
+    """
     sim("PUT", "/chaos", {})
+    try:
+        sink("PUT", "/mode", {})
+    except Inconclusive as e:
+        print(f"  note  sink mode not reset: {e}")
 
     def drained():
         k = sim("GET", "/counters")
@@ -159,8 +169,10 @@ def quiesce():
     ok, _ = poll(drained, 60)
     if not ok:
         raise Inconclusive("simulator still buffering or disconnected after 60 s")
+    t_cut = t_cut or db_now()
     sim("PUT", "/generation", {"paused": True})
     ledger, counters = sim("GET", "/ledger"), sim("GET", "/counters")
+
     def lag_zero():
         try:
             return sum(topic.group_lag().values()) == 0
@@ -170,15 +182,18 @@ def quiesce():
     ok, took = poll(lag_zero, QUIESCE_S)
     if not ok:
         raise Inconclusive(f"consumer lag not 0 after {QUIESCE_S} s (is the processor running?)")
-    return ledger, counters, took
+    ok, took2 = poll(lambda: db_query("SELECT count(*) FROM outbox WHERE status = 'PENDING' AND created_at <= %s", (t_cut,))[0][0] == 0, QUIESCE_S)
+    if not ok:
+        raise Inconclusive(f"webhooks still pending {QUIESCE_S} s after lag 0 (is the sink up and its mode clear?)")
+    return ledger, counters, took + took2, t_cut
 
 
-def reconcile(c: Checks, since_ms, tamper=None, mon=None, base=None):
+def reconcile(c: Checks, since_ms, tamper=None, mon=None, base=None, t_cut=None, allow_dead=False):
     """Quiesce, compare, resume generation. since_ms = scenario start, bounds the dead-letter read."""
     try:
-        ledger, counters, took = quiesce()
-        c.note(f"quiesced: lag 0 after {took:.0f}s of waiting")
-        return compare(c, ledger, counters, since_ms, tamper, mon, base)
+        ledger, counters, took, t_cut = quiesce(t_cut)
+        c.note(f"quiesced: lag 0 and no pending webhook after {took:.0f}s of waiting; cut at {t_cut:%H:%M:%S}")
+        return compare(c, ledger, counters, since_ms, tamper, mon, base, t_cut, allow_dead)
     finally:
         try:
             sim("PUT", "/generation", {"paused": False})
@@ -186,7 +201,7 @@ def reconcile(c: Checks, since_ms, tamper=None, mon=None, base=None):
             print(f"  note  could not resume generation: {e}")
 
 
-def compare(c, ledger, counters, since_ms, tamper=None, mon=None, base=None):
+def compare(c, ledger, counters, since_ms, tamper=None, mon=None, base=None, t_cut=None, allow_dead=False):
     """base = ledger devices at scenario start; the topic is then compared over the window only."""
     epoch, seed = ledger["epoch"], ledger["seed"]
     L = {d["deviceId"]: (d["acceptedCount"], d["maxAcceptedSeq"]) for d in ledger["devices"]}
@@ -255,7 +270,11 @@ def compare(c, ledger, counters, since_ms, tamper=None, mon=None, base=None):
     c.add("generated equals accepted + dropped + overflow + buffered", counter_gap(counters) == 0, f"difference {counter_gap(counters)}; {counters}")
     dlq_check(c, since_ms)
     c.add("sent equals accepted + injected duplicates", counters["sent"] == counters["accepted"] + counters["injectedDups"], f"sent={counters['sent']} accepted={counters['accepted']} dups={counters['injectedDups']}")
-    return {"db": [m[0] for m in bad_db], "topic": [m[0] for m in bad_topic]}
+    out = {"db": [m[0] for m in bad_db], "topic": [m[0] for m in bad_topic]}
+    if t_cut is not None:
+        since_dt = datetime.fromtimestamp(since_ms / 1000, timezone.utc)
+        out["window"] = m3checks.run_all(c, since_dt, t_cut, epoch, base is not None, allow_dead)
+    return out
 
 
 def selftest():
@@ -273,7 +292,34 @@ def selftest():
         ("event id caused two transitions", dups(["a", "b", "a"]) == ["a"]),
         ("broken transition chain", chain_breaks([("d", "HEALTHY", "FAILED"), ("d", "OFFLINE", "HEALTHY")]) == ["d"]),
         ("device moved backwards", bool(regressions({"d": (1, 5)}, {"d": (1, 4)}))),
+        ("alert without its acked outbox row", bool(m3checks.outbox_mismatch([(1, 2, True, False, ["opened"])]))),
+        ("outbox row without the alert transition", bool(m3checks.outbox_mismatch([(1, 2, False, False, ["opened", "acked"])]))),
+        ("outbox count differs from version", bool(m3checks.outbox_mismatch([(1, 3, False, True, ["opened", "resolved"])]))),
+        ("consistent alert and outbox pass", not m3checks.outbox_mismatch([(1, 3, True, True, ["opened", "acked", "resolved"]), (2, 1, False, False, ["opened"])])),
+        ("two open alerts for one rule", m3checks.multi_open([("d", "r", "OPEN"), ("d", "r", "ACKED"), ("d", "x", "OPEN"), ("d", "r", "RESOLVED")]) == [("d", "r")]),
+        ("missing sink key", bool(_hooks([("alert-1-opened", 1, 1, "DELIVERED", True)], [])["every non-dead outbox key reached the sink"])),
+        ("spurious sink key", bool(_hooks([], [_key("alert-9-opened", 9, 1)])["no sink key without an outbox row"])),
+        ("dead outbox row", bool(_hooks([("alert-1-opened", 1, 1, "DEAD", True)], [])["no dead outbox rows"])),
+        ("pending outbox row at the cut", bool(_hooks([("alert-1-opened", 1, 1, "PENDING", True)], [_key("alert-1-opened", 1, 1)])["no pending outbox rows at the cut"])),
+        ("rejected invalid payload", bool(_hooks([], [], {"rejectedInvalid": 1})["sink saw only valid payloads"])),
+        ("sink order against alert version", bool(_hooks([("alert-1-opened", 1, 1, "DELIVERED", True), ("alert-1-resolved", 1, 2, "DELIVERED", True)], [_key("alert-1-opened", 1, 1, "2"), _key("alert-1-resolved", 1, 2, "1")])["per alert, first receipt follows alert version"])),
+        ("duplicate deliveries and delivered rows pass", not any(_hooks([("alert-1-opened", 1, 1, "DELIVERED", True)], [{**_key("alert-1-opened", 1, 1), "count": 3}]).values())),
+        ("model: wrong transition", bool(oracle.diff("d", *oracle.model(_samples(3)), [("HEALTHY", "FAILED", "telemetry", 3)], {}))),
+        ("model: missing alert", bool(oracle.diff("d", *oracle.model(_samples(3)), oracle.model(_samples(3))[0], {}))),
+        ("model: extra transition", bool(oracle.diff("d", [], {}, [("HEALTHY", "OFFLINE", "offline_sweep", None)], {}))),
         ("diagnosis: lost in processor", "processor" in diagnose([(1, 3)], [1, 2, 3], [1, 3])),
         ("diagnosis: lost in kafka", "Kafka" in diagnose([(1, 3)], [1, 3], [1, 3])),
         ("diagnosis: ledger under-count", "under-count" in diagnose([(1, 2)], [1, 2, 3], [1, 2, 3])),
     ]
+
+
+def _key(key, alert, version, at="1"):
+    return {"key": key, "count": 1, "alertId": alert, "alertVersion": version, "firstReceivedAt": at, "lastReceivedAt": at}
+
+
+def _hooks(outbox, keys, summary=None):
+    return m3checks.webhook_mismatch(outbox, keys, summary or {"rejectedInvalid": 0})
+
+
+def _samples(n):
+    return [(i + 1, (75.0, 80.0, 0), False) for i in range(n)]

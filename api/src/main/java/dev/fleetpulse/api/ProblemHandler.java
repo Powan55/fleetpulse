@@ -21,6 +21,7 @@ public class ProblemHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<Object> api(ApiException e, WebRequest req) {
         ProblemDetail p = ProblemDetail.forStatusAndDetail(e.status, e.getMessage());
         if (!e.errors.isEmpty()) p.setProperty("errors", e.errors);
+        if (e.alert != null) p.setProperty("alert", e.alert);
         return handleExceptionInternal(e, p, new HttpHeaders(), e.status, req);
     }
 
@@ -39,6 +40,7 @@ public class ProblemHandler extends ResponseEntityExceptionHandler {
             p.setProperty("code", switch (status.value()) {
                 case 400, 405, 411, 413 -> "VALIDATION_FAILED";
                 case 404 -> "NOT_FOUND";
+                case 409 -> "ALERT_RESOLVED";
                 case 415 -> "UNSUPPORTED_MEDIA_TYPE";
                 default -> "INTERNAL";
             });

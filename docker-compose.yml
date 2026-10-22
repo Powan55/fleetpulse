@@ -147,6 +147,18 @@ services:
       SIM_BUFFER_CAPACITY: ${SIM_BUFFER_CAPACITY:-400}
       SIM_MAX_SEND_RATE: ${SIM_MAX_SEND_RATE:-2000}
 
+  sink:
+    <<: *jvm
+    build:
+      context: ./sink
+      dockerfile: ../infra/docker/sink.Dockerfile
+    mem_limit: 256m
+    cpus: 0.2
+    environment:
+      SERVER_PORT: "8080"
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
+      FP_PAYLOAD_LIMIT: ${FP_PAYLOAD_LIMIT:-10000}
+
   processor:
     <<: *jvm
     build:
@@ -160,6 +172,8 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
+      sink:
+        condition: service_healthy
     environment:
       SERVER_PORT: "8080"
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
@@ -175,10 +189,25 @@ services:
       FP_SESSION_TIMEOUT: 10s
       FP_NOTIFY_CHANNEL: fleetpulse_changes
       FP_TEST_HOOKS_ENABLED: "false"
+      FP_OFFLINE_TIMEOUT: ${FP_OFFLINE_TIMEOUT:-10s}
+      FP_SWEEP_INTERVAL: ${FP_SWEEP_INTERVAL:-1s}
+      FP_SWEEP_MAX_LAG: ${FP_SWEEP_MAX_LAG:-1000}
+      FP_SWEEP_GRACE: ${FP_SWEEP_GRACE:-10s}
+      FP_SINK_URL: http://sink:8080/webhooks/alerts
+      FP_WEBHOOK_TIMEOUT: ${FP_WEBHOOK_TIMEOUT:-5s}
+      FP_WEBHOOK_MAX_ATTEMPTS: ${FP_WEBHOOK_MAX_ATTEMPTS:-20}
+      FP_WEBHOOK_BACKOFF_BASE: ${FP_WEBHOOK_BACKOFF_BASE:-1s}
+      FP_WEBHOOK_BACKOFF_MAX: ${FP_WEBHOOK_BACKOFF_MAX:-30s}
+      FP_WEBHOOK_JITTER: ${FP_WEBHOOK_JITTER:-0.2}
+      FP_WEBHOOK_CONCURRENCY: ${FP_WEBHOOK_CONCURRENCY:-10}
+      FP_OUTBOX_POLL_INTERVAL: ${FP_OUTBOX_POLL_INTERVAL:-250ms}
       FP_RETENTION_INBOX: ${FP_RETENTION_INBOX:-30m}
       FP_RETENTION_TELEMETRY: ${FP_RETENTION_TELEMETRY:-15m}
       FP_RETENTION_LATE: ${FP_RETENTION_LATE:-1h}
       FP_RETENTION_INTERVAL: ${FP_RETENTION_INTERVAL:-60s}
+      FP_RETENTION_HISTORY: ${FP_RETENTION_HISTORY:-7d}
+      FP_RETENTION_ALERTS: ${FP_RETENTION_ALERTS:-7d}
+      FP_RETENTION_OUTBOX_DELIVERED: ${FP_RETENTION_OUTBOX_DELIVERED:-24h}
 
   api:
     <<: *jvm

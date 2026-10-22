@@ -2,10 +2,15 @@ package dev.fleetpulse.simulator;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -15,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.http.HttpStatus;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
@@ -24,6 +30,12 @@ class Fleet implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(Fleet.class);
     private static final long TICK_MS = 20;
     private static final long PAUSE_WAIT_MS = 30_000;
+    private static final long RETRY_NANOS = 1_000_000_000L;
+    private static final int MAX_ACTIVE = 1000;
+
+    record Disc(String id, int[] devices, long untilNanos, Instant until) {}
+
+    private record Failed(int device, Device.Event event) {}
 
     private final SimProperties props;
     private final KafkaTemplate<String, String> kafka;
@@ -39,6 +51,24 @@ class Fleet implements SmartLifecycle {
     private final long[] maxSent;
     private final long holdNanos;
     private final List<Integer> skewOrder = new ArrayList<>();
+    private final List<Integer> pickOrder = new ArrayList<>();
+    private final int capacity;
+    private final double maxRate;
+    private final List<TreeMap<Long, Device.Event>> queue = new ArrayList<>();
+    private final long[] discUntil;
+    private final long[] retryAfter;
+    private final boolean[] wasDisc;
+    private final ConcurrentLinkedQueue<Failed> failed = new ConcurrentLinkedQueue<>();
+    private final List<Fault> faults = new ArrayList<>();
+    private final Map<String, Disc> discs = new LinkedHashMap<>();
+    private volatile long nowNanos;
+    private long lastPump;
+    private double bucket;
+    private double replayTokens;
+    private int rr;
+    private int queued;
+    private long faultSeq;
+    private long discSeq;
     private final Object lock = new Object();
     private final AtomicLong inflight = new AtomicLong();
     private final AtomicLong malformedSeq = new AtomicLong();
@@ -63,6 +93,16 @@ class Fleet implements SmartLifecycle {
             skewOrder.add(i - 1);
         }
         Collections.shuffle(skewOrder, new Random(props.seed() ^ 0x5EEDL));
+        pickOrder.addAll(skewOrder);
+        Collections.shuffle(pickOrder, new Random(props.seed() ^ 0xFA17L));
+        capacity = props.bufferCapacity();
+        maxRate = props.maxSendRate();
+        discUntil = new long[devices.size()];
+        retryAfter = new long[devices.size()];
+        wasDisc = new boolean[devices.size()];
+        for (int i = 0; i < devices.size(); i++) {
+            queue.add(new TreeMap<>());
+        }
         nextHb = new long[devices.size()];
         nextTel = new long[devices.size()];
         held = new Device.Event[devices.size()];
@@ -83,6 +123,8 @@ class Fleet implements SmartLifecycle {
     }
 
     void init(long t0) {
+        nowNanos = t0;
+        lastPump = t0;
         schedule(t0);
     }
 
@@ -183,6 +225,13 @@ class Fleet implements SmartLifecycle {
     void tick(long now) {
         try {
             synchronized (lock) {
+                nowNanos = now;
+                double dt = Math.max(0, now - lastPump) / 1e9;
+                lastPump = now;
+                requeueFailures(now);
+                expire(now);
+                reconnects(now);
+                pump(now, dt);
                 if (paused) {
                     return;
                 }
@@ -221,7 +270,7 @@ class Fleet implements SmartLifecycle {
         Device d = devices.get(i);
         Chaos ch = chaos;
         long skew = skewMs[i];
-        Device.Event e = d.next(type, clock.instant(), skew);
+        Device.Event e = d.next(type, clock.instant(), skew, "telemetry".equals(type) ? faultLevels(i) : null);
         counters.generated.incrementAndGet();
         if (skew != 0) {
             counters.skewedEvents.incrementAndGet();
@@ -233,7 +282,7 @@ class Fleet implements SmartLifecycle {
             return;
         }
         counters.buffered.incrementAndGet();
-        if (held[i] == null && reorder < ch.reorderRate()) {
+        if (held[i] == null && reorder < ch.reorderRate() && !disconnected(i, now)) {
             held[i] = e;
             heldAt[i] = now;
             return;
@@ -255,6 +304,10 @@ class Fleet implements SmartLifecycle {
     }
 
     private void transmit(int i, Device.Event e) {
+        if (disconnected(i, nowNanos) || !queue.get(i).isEmpty()) {
+            enqueue(i, e);
+            return;
+        }
         maxSent[i] = Math.max(maxSent[i], e.seq());
         send(i, e, true);
         if (devices.get(i).chaos.nextDouble() < chaos.duplicateRate()) {
@@ -266,6 +319,7 @@ class Fleet implements SmartLifecycle {
     private void send(int i, Device.Event e, boolean primary) {
         inflight.incrementAndGet();
         counters.sent.incrementAndGet();
+        bucket--;
         try {
             kafka.send(props.topic(), e.deviceId(), e.json()).whenComplete((r, ex) -> done(i, e, primary, ex));
         } catch (RuntimeException ex) {
@@ -276,13 +330,197 @@ class Fleet implements SmartLifecycle {
     private void done(int i, Device.Event e, boolean primary, Throwable ex) {
         if (ex == null) {
             ledger.add(i, e.seq(), clock.instant());
+            if (primary) {
+                counters.buffered.decrementAndGet();
+            }
         } else {
             counters.sendFailed.incrementAndGet();
-        }
-        if (primary) {
-            counters.buffered.decrementAndGet();
+            if (primary) {
+                failed.add(new Failed(i, e));
+            }
         }
         inflight.decrementAndGet();
+    }
+
+    private boolean disconnected(int i, long now) {
+        return discUntil[i] > now;
+    }
+
+    /** Drop-oldest bounded queue; a dropped event is never sent, so it never reaches the ledger. */
+    private void enqueue(int i, Device.Event e) {
+        TreeMap<Long, Device.Event> q = queue.get(i);
+        q.put(e.seq(), e);
+        queued++;
+        if (q.size() > capacity) {
+            q.pollFirstEntry();
+            queued--;
+            counters.bufferOverflow.incrementAndGet();
+            counters.buffered.decrementAndGet();
+        }
+    }
+
+    private void requeueFailures(long now) {
+        for (Failed f; (f = failed.poll()) != null; ) {
+            retryAfter[f.device()] = now + RETRY_NANOS;
+            enqueue(f.device(), f.event());
+        }
+    }
+
+    private void expire(long now) {
+        faults.removeIf(f -> f.untilNanos != null && now >= f.untilNanos);
+        discs.values().removeIf(d -> now >= d.untilNanos());
+    }
+
+    private void reconnects(long now) {
+        for (int i = 0; i < devices.size(); i++) {
+            if (disconnected(i, now)) {
+                wasDisc[i] = true;
+            } else if (wasDisc[i]) {
+                wasDisc[i] = false;
+                if (!chaos.replayOnReconnect()) {
+                    TreeMap<Long, Device.Event> q = queue.get(i);
+                    counters.bufferOverflow.addAndGet(q.size());
+                    counters.buffered.addAndGet(-q.size());
+                    queued -= q.size();
+                    q.clear();
+                }
+            }
+        }
+    }
+
+    /** One queued event per device per turn, seq order within a device, at the leftover send budget. */
+    private void pump(long now, double dt) {
+        bucket = Math.min(Math.max(1, maxRate * 0.1), bucket + maxRate * dt);
+        Long cap = chaos.replayMaxRate();
+        if (cap != null) {
+            replayTokens = Math.min(Math.max(1, cap * 0.1), replayTokens + cap * dt);
+        }
+        int n = devices.size();
+        int start = rr;
+        boolean progress = queued > 0;
+        while (progress && budget(cap)) {
+            progress = false;
+            for (int k = 0; k < n && queued > 0 && budget(cap); k++) {
+                int i = (start + k) % n;
+                TreeMap<Long, Device.Event> q = queue.get(i);
+                if (q.isEmpty() || disconnected(i, now) || retryAfter[i] > now) {
+                    continue;
+                }
+                Device.Event e = q.pollFirstEntry().getValue();
+                queued--;
+                counters.replayed.incrementAndGet();
+                maxSent[i] = Math.max(maxSent[i], e.seq());
+                replayTokens--;
+                send(i, e.asReplay(), true);
+                rr = (i + 1) % n;
+                progress = true;
+            }
+        }
+    }
+
+    private boolean budget(Long cap) {
+        return bucket >= 1 && (cap == null || replayTokens >= 1);
+    }
+
+    private Fault.Level[] faultLevels(int i) {
+        if (faults.isEmpty()) {
+            return null;
+        }
+        Fault.Level[] lv = new Fault.Level[3];
+        for (Fault f : faults) {
+            if (java.util.Arrays.binarySearch(f.devices, i) >= 0) {
+                Fault.Level l = f.next(i);
+                int m = metricIndex(f.metric);
+                if (lv[m] == null) {
+                    lv[m] = l;
+                }
+            }
+        }
+        return lv;
+    }
+
+    private static int metricIndex(String metric) {
+        return switch (metric) {
+            case "temperature" -> 0;
+            case "battery" -> 1;
+            default -> 2;
+        };
+    }
+
+    /** Deterministic from the seed: the same fraction always picks the same devices. */
+    int[] pick(double fraction) {
+        int n = Math.max(1, (int) Math.round(fraction * devices.size()));
+        return pickOrder.stream().limit(n).mapToInt(Integer::intValue).sorted().toArray();
+    }
+
+    Fault addFault(String metric, Fault.Level level, List<Fault.Step> steps, Long durationMs, int[] devs) {
+        synchronized (lock) {
+            if (faults.size() >= MAX_ACTIVE) {
+                throw new SimException(HttpStatus.CONFLICT, "too many active faults");
+            }
+            Fault f = new Fault("fault-" + (++faultSeq), metric, level, steps, devs, devices.size(),
+                    durationMs == null ? null : nowNanos + durationMs * 1_000_000L,
+                    durationMs == null ? null : clock.instant().plusMillis(durationMs));
+            faults.add(f);
+            return f;
+        }
+    }
+
+    List<Fault> faults() {
+        synchronized (lock) {
+            return List.copyOf(faults);
+        }
+    }
+
+    boolean removeFault(String id) {
+        synchronized (lock) {
+            return faults.removeIf(f -> f.id.equals(id));
+        }
+    }
+
+    void clearFaults() {
+        synchronized (lock) {
+            faults.clear();
+        }
+    }
+
+    Disc startDisconnect(int[] devs, long durationMs) {
+        synchronized (lock) {
+            if (discs.size() >= MAX_ACTIVE) {
+                throw new SimException(HttpStatus.CONFLICT, "too many active disconnects");
+            }
+            long until = nowNanos + durationMs * 1_000_000L;
+            for (int i : devs) {
+                discUntil[i] = Math.max(discUntil[i], until);
+            }
+            Disc d = new Disc("disconnect-" + (++discSeq), devs, until, clock.instant().plusMillis(durationMs));
+            discs.put(d.id(), d);
+            return d;
+        }
+    }
+
+    List<Disc> disconnects() {
+        synchronized (lock) {
+            return List.copyOf(discs.values());
+        }
+    }
+
+    void reconnectAll() {
+        synchronized (lock) {
+            java.util.Arrays.fill(discUntil, 0);
+            discs.clear();
+        }
+    }
+
+    int disconnectedDevices() {
+        int c = 0;
+        long now = nowNanos;
+        for (long u : discUntil) {
+            if (u > now) {
+                c++;
+            }
+        }
+        return c;
     }
 
     /** Sends count malformed records of one kind; returns how many Kafka acked. */

@@ -21,7 +21,13 @@ public final class Dto {
     public record DeviceDetail(String deviceId, String state, long stateVersion, Instant stateChangedAt,
                                Instant lastSeenAt, Instant lastEventTime, long lastEpoch, long lastSeq,
                                List<TelemetryPoint> recentTelemetry, List<StateTransition> stateHistory,
-                               List<Object> alerts) {}
+                               List<Alert> alerts) {}
+
+    public record Alert(long alertId, String deviceId, String ruleId, String status, int version, boolean backfilled,
+                        Instant openedAt, Instant ackedAt, Instant resolvedAt, String resolvedBy, Instant updatedAt,
+                        UUID triggerEventId, Instant conditionStartedEventTime) {}
+
+    public record AlertPage(List<Alert> items, int page, int size, long totalItems) {}
 
     public record FleetSummary(long total, Map<String, Long> byState, Instant asOf) {}
 

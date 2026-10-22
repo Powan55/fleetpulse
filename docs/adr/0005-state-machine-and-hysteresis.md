@@ -18,7 +18,8 @@ Devices are HEALTHY, DEGRADED, FAILED, OFFLINE or RECOVERING. A metric oscillati
 | OFFLINE | RECOVERING | any in-order event, heartbeat included |
 | any except OFFLINE | OFFLINE | offline sweep (0004) |
 
-  First match wins, at most one transition per event. Entering RECOVERING or OFFLINE resets the counters. So OFFLINE to HEALTHY takes 5 healthy samples, and FAILED to HEALTHY takes 10.
+  First match wins, at most one transition per event. Entering RECOVERING or OFFLINE resets the counters. FAILED to HEALTHY takes 10 OK samples.
+- Leaving OFFLINE: the device moves to RECOVERING first, then the same event's sample (if it is telemetry) is counted as the first sample in RECOVERING. No second transition happens on that event. A heartbeat moves the device but counts nothing. So OFFLINE to HEALTHY takes 5 OK telemetry samples including the one that ended OFFLINE. Example with telemetry on odd seqs: seq 1499 ends OFFLINE (OK count 1), 1501, 1503, 1505 bring it to 4, and 1507 makes the device HEALTHY. Had heartbeat 1498 ended OFFLINE instead, the count would still reach 5 at 1507. The trigger sample counts toward the metric alert streaks too, so state and alerts see the same samples.
 - Metric alert rules keep their own streaks per device and rule: open after 3 breaching samples, auto-resolve after 5 clear ones. If an operator resolves an alert while the condition persists, the streak restarts and a new alert needs 3 fresh breaching samples (about 4-7 s live).
 - State rules (offline, failed) open on entering the state and resolve on leaving it. If an operator resolves one while the state persists, it re-opens 6 s later.
 - An alert is `backfilled` when the sample that opened it was replayed from the device buffer. A fault that started and ended during a disconnect therefore produces one alert, opened and resolved, two webhooks, both backfilled.

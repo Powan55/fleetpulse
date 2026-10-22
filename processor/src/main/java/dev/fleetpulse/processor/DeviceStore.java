@@ -6,15 +6,16 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,13 +41,27 @@ class DeviceStore {
     private static final Comparator<Validator.Event> ORDER = Comparator.<Validator.Event>comparingLong(Validator.Event::epoch)
             .thenComparingLong(Validator.Event::seq);
 
+    private record Trans(String device, String from, String to, String cause, Applied a) {}
+
+    private static final class Dev {
+        long[] cur;
+        StateMachine.Dev sm;
+        long version;
+        boolean changed;
+        Map<String, StateMachine.Streak> streaks;
+    }
+
     private final JdbcTemplate jdbc;
     private final JsonMapper mapper = JsonMapper.builder().build();
-    private final String channel;
+    private final Rules rules;
+    private final AlertStore alerts;
+    private final MeterRegistry meters;
 
-    DeviceStore(JdbcTemplate jdbc, @Value("${fp.notify-channel}") String channel) {
+    DeviceStore(JdbcTemplate jdbc, Rules rules, AlertStore alerts, MeterRegistry meters) {
         this.jdbc = jdbc;
-        this.channel = channel;
+        this.rules = rules;
+        this.alerts = alerts;
+        this.meters = meters;
     }
 
     private static final class Stat {
@@ -83,16 +98,30 @@ class DeviceStore {
                 INSERT INTO device (device_id, state, last_epoch, last_seq, last_seen_at)
                 SELECT u.id, 'HEALTHY', 0, 0, now() FROM unnest(?::text[]) AS u(id) ORDER BY u.id
                 ON CONFLICT (device_id) DO NOTHING RETURNING device_id""", new Arr("text", ids));
-        Map<String, long[]> cursor = new HashMap<>();
+        Map<String, Dev> devs = new HashMap<>();
         jdbc.execute((Connection c) -> {
-            try (var ps = c.prepareStatement("SELECT device_id, last_epoch, last_seq FROM device WHERE device_id = ANY(?) ORDER BY device_id FOR UPDATE")) {
+            try (var ps = c.prepareStatement("""
+                    SELECT device_id, last_epoch, last_seq, state, state_version, bad_n, fail_n, ok_n, rule_streaks::text
+                    FROM device WHERE device_id = ANY(?) ORDER BY device_id FOR UPDATE""")) {
                 bind(c, ps, new Arr[] {new Arr("text", ids)});
                 try (var rs = ps.executeQuery()) {
-                    while (rs.next()) cursor.put(rs.getString(1), new long[] {rs.getLong(2), rs.getLong(3)});
+                    while (rs.next()) {
+                        Dev d = new Dev();
+                        d.cur = new long[] {rs.getLong(2), rs.getLong(3)};
+                        d.sm = new StateMachine.Dev(rs.getString(4), rs.getInt(6), rs.getInt(7), rs.getInt(8));
+                        d.version = rs.getLong(5);
+                        d.streaks = readStreaks(rs.getString(9));
+                        devs.put(rs.getString(1), d);
+                    }
                 }
             }
             return null;
         });
+        Map<String, Map<String, Long>> open = alerts.openAlerts(ids);
+        for (var e : devs.entrySet()) reconcile(e.getValue(), open.getOrDefault(e.getKey(), Map.of()));
+        Set<String> changedDevices = new LinkedHashSet<>(created);
+        Set<Long> touched = new LinkedHashSet<>();
+        List<Trans> trans = new ArrayList<>();
 
         Map<String, Stat> stats = new TreeMap<>();
         List<Applied> late = new ArrayList<>(), tel = new ArrayList<>();
@@ -101,7 +130,8 @@ class DeviceStore {
         int inOrder = 0;
         long gapTotal = 0;
         for (var e : byDevice.entrySet()) {
-            long[] cur = cursor.get(e.getKey());
+            Dev dev = devs.get(e.getKey());
+            long[] cur = dev.cur;
             for (Applied a : e.getValue()) {
                 Validator.Event ev = a.event();
                 Stat st = stats.computeIfAbsent(ev.deviceId() + "\n" + ev.epoch(), k -> new Stat());
@@ -124,6 +154,7 @@ class DeviceStore {
                 lastInOrder.put(ev.deviceId(), a);
                 inOrder++;
                 if (ev.telemetry()) tel.add(a);
+                evaluate(dev, a, trans, touched);
             }
         }
 
@@ -160,12 +191,44 @@ class DeviceStore {
 
         if (!lastInOrder.isEmpty()) {
             List<Applied> last = new ArrayList<>(lastInOrder.values());
+            List<Dev> ds = last.stream().map(a -> devs.get(a.event().deviceId())).toList();
             update("""
-                    UPDATE device d SET last_epoch = u.ep, last_seq = u.sq, last_seen_at = %s, last_event_time = %s
-                    FROM unnest(?::text[], ?::bigint[], ?::bigint[], ?::bigint[], ?::bigint[]) AS u(id, ep, sq, seen, ev)
+                    UPDATE device d SET last_epoch = u.ep, last_seq = u.sq, last_seen_at = %s, last_event_time = %s,
+                      state = u.st, state_version = u.ver, state_changed_at = CASE WHEN u.chg THEN now() ELSE d.state_changed_at END,
+                      bad_n = u.bad, fail_n = u.fail, ok_n = u.ok, rule_streaks = u.rs::jsonb
+                    FROM unnest(?::text[], ?::bigint[], ?::bigint[], ?::bigint[], ?::bigint[], ?::text[], ?::bigint[], ?::boolean[],
+                                ?::int[], ?::int[], ?::int[], ?::text[]) AS u(id, ep, sq, seen, ev, st, ver, chg, bad, fail, ok, rs)
                     WHERE d.device_id = u.id""".formatted(TS.formatted("u.seen"), TS.formatted("u.ev")),
                     text(last, a -> a.event().deviceId()), longs(last, a -> a.event().epoch()), longs(last, a -> a.event().seq()),
-                    longs(last, a -> a.brokerTimeMs() * 1000), longs(last, a -> a.event().eventTimeMicros()));
+                    longs(last, a -> a.brokerTimeMs() * 1000), longs(last, a -> a.event().eventTimeMicros()),
+                    new Arr("text", ds.stream().map(d -> d.sm.state()).toArray(String[]::new)),
+                    new Arr("bigint", ds.stream().map(d -> d.version).toArray(Long[]::new)),
+                    new Arr("boolean", ds.stream().map(d -> d.changed).toArray(Boolean[]::new)),
+                    new Arr("int4", ds.stream().map(d -> d.sm.bad()).toArray(Integer[]::new)),
+                    new Arr("int4", ds.stream().map(d -> d.sm.fail()).toArray(Integer[]::new)),
+                    new Arr("int4", ds.stream().map(d -> d.sm.ok()).toArray(Integer[]::new)),
+                    new Arr("text", ds.stream().map(d -> writeStreaks(d.streaks)).toArray(String[]::new)));
+        }
+
+        if (!trans.isEmpty()) {
+            update("""
+                    INSERT INTO state_transition (device_id, from_state, to_state, cause, event_id, epoch, seq, event_time, replay)
+                    SELECT u.dev, u.fr, u.tt, u.ca, u.id::uuid, u.ep, u.sq, %s, u.rp
+                    FROM unnest(?::text[], ?::text[], ?::text[], ?::text[], ?::text[], ?::bigint[], ?::bigint[], ?::bigint[], ?::boolean[])
+                         WITH ORDINALITY AS u(dev, fr, tt, ca, id, ep, sq, ev, rp, n) ORDER BY u.n""".formatted(TS.formatted("u.ev")),
+                    new Arr("text", trans.stream().map(Trans::device).toArray(String[]::new)),
+                    new Arr("text", trans.stream().map(Trans::from).toArray(String[]::new)),
+                    new Arr("text", trans.stream().map(Trans::to).toArray(String[]::new)),
+                    new Arr("text", trans.stream().map(Trans::cause).toArray(String[]::new)),
+                    new Arr("text", trans.stream().map(t -> t.a().event().eventId()).toArray(String[]::new)),
+                    new Arr("bigint", trans.stream().map(t -> t.a().event().epoch()).toArray(Long[]::new)),
+                    new Arr("bigint", trans.stream().map(t -> t.a().event().seq()).toArray(Long[]::new)),
+                    new Arr("bigint", trans.stream().map(t -> t.a().event().eventTimeMicros()).toArray(Long[]::new)),
+                    new Arr("boolean", trans.stream().map(t -> t.a().event().replay()).toArray(Boolean[]::new)));
+            for (Trans t : trans) {
+                changedDevices.add(t.device());
+                meters.counter("fleetpulse.processor.transitions", "from", t.from(), "to", t.to()).increment();
+            }
         }
 
         List<String> keys = new ArrayList<>(stats.keySet());
@@ -184,16 +247,85 @@ class DeviceStore {
                 new Arr("bigint", keys.stream().map(k -> stats.get(k).late).toArray(Long[]::new)),
                 new Arr("bigint", keys.stream().map(k -> stats.get(k).gaps).toArray(Long[]::new)));
 
-        notifyDevices(created);
+        if (!changedDevices.isEmpty()) alerts.notifyDevices(changedDevices);
+        if (!touched.isEmpty()) alerts.notifyAlerts(touched);
         return new Counts(inOrder, duplicates, late.size(), gapTotal);
     }
 
-    private void notifyDevices(List<String> ids) {
-        for (int i = 0; i < ids.size(); i += NOTIFY_IDS) {
-            String payload = mapper.writeValueAsString(
-                    Map.of("t", "d", "ids", ids.subList(i, Math.min(ids.size(), i + NOTIFY_IDS))));
-            jdbc.query("SELECT pg_notify(?, ?)", rs -> {}, channel, payload);
+    private void reconcile(Dev d, Map<String, Long> open) {
+        for (Rules.Rule r : rules.rules()) {
+            if (!r.metricRule()) continue;
+            StateMachine.Streak s = d.streaks.getOrDefault(r.id(), StateMachine.Streak.NONE);
+            Long id = open.get(r.id());
+            if (s.open() != null && id == null) d.streaks.remove(r.id());
+            else if (id != null && !id.equals(s.open())) d.streaks.put(r.id(), new StateMachine.Streak(s.t(), 0, id, s.start()));
         }
+    }
+
+    private void evaluate(Dev d, Applied a, List<Trans> trans, Set<Long> touched) {
+        Validator.Event ev = a.event();
+        String dev = ev.deviceId();
+        String from = d.sm.state();
+        StateMachine.Dev next;
+        if (ev.telemetry()) {
+            next = StateMachine.onSample(rules, d.sm, rules.severity(ev.temperatureC(), ev.batteryPct(), ev.errorCount()));
+            for (Rules.Rule r : rules.rules()) {
+                if (!r.metricRule()) continue;
+                double v = switch (r.metric()) {
+                    case "temperature_c" -> ev.temperatureC();
+                    case "battery_pct" -> ev.batteryPct();
+                    default -> ev.errorCount();
+                };
+                StateMachine.Step st = StateMachine.metric(rules, d.streaks.getOrDefault(r.id(), StateMachine.Streak.NONE), r.breached(v), ev.eventTimeMicros());
+                StateMachine.Streak ns = st.streak();
+                if (st.act() == StateMachine.Act.OPEN) {
+                    Long id = alerts.open(dev, r.id(), ev.replay(), ev.eventId(), ns.start(), touched);
+                    ns = new StateMachine.Streak(ns.t(), 0, id, ns.start());
+                } else if (st.act() == StateMachine.Act.RESOLVE) {
+                    alerts.resolve(dev, r.id(), touched);
+                }
+                if (ns.t() == 0 && ns.f() == 0 && ns.open() == null) d.streaks.remove(r.id());
+                else d.streaks.put(r.id(), ns);
+            }
+        } else {
+            next = StateMachine.onEvent(d.sm);
+        }
+        if (!next.state().equals(from)) {
+            d.version++;
+            d.changed = true;
+            trans.add(new Trans(dev, from, next.state(), from.equals("OFFLINE") ? "event_after_offline" : "telemetry", a));
+            for (Rules.Rule r : rules.rules()) {
+                if (r.metricRule()) continue;
+                if (r.state().equals(from)) alerts.resolve(dev, r.id(), touched);
+                if (r.state().equals(next.state())) alerts.open(dev, r.id(), ev.replay(), ev.eventId(), ev.telemetry() ? ev.eventTimeMicros() : null, touched);
+            }
+        }
+        d.sm = next;
+    }
+
+    private Map<String, StateMachine.Streak> readStreaks(String json) {
+        Map<String, StateMachine.Streak> out = new HashMap<>();
+        var root = mapper.readTree(json == null ? "{}" : json);
+        for (String k : root.propertyNames()) {
+            var n = root.get(k);
+            out.put(k, new StateMachine.Streak(n.path("t").asInt(0), n.path("f").asInt(0),
+                    n.hasNonNull("open") ? n.get("open").asLong() : null, n.hasNonNull("s") ? n.get("s").asLong() : null));
+        }
+        return out;
+    }
+
+    private String writeStreaks(Map<String, StateMachine.Streak> m) {
+        Map<String, Map<String, Object>> out = new java.util.TreeMap<>();
+        for (var e : m.entrySet()) {
+            StateMachine.Streak s = e.getValue();
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("t", s.t());
+            o.put("f", s.f());
+            o.put("open", s.open());
+            if (s.start() != null) o.put("s", s.start());
+            out.put(e.getKey(), o);
+        }
+        return mapper.writeValueAsString(out);
     }
 
     static SQLException sqlCause(Throwable t) {

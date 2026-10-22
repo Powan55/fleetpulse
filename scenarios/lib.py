@@ -19,6 +19,7 @@ URLS = {
     "api": os.environ.get("API_URL", "http://api:8080"),
     "simulator": os.environ.get("SIM_URL", "http://simulator:8080"),
     "processor": os.environ.get("PROCESSOR_URL", "http://processor:8080"),
+    "sink": os.environ.get("SINK_URL", "http://sink:8080"),
 }
 # local-only default credentials of the read-only role
 PG = dict(
@@ -78,6 +79,27 @@ def sim(method, path, body=None):
     if not 200 <= status < 300:
         raise Inconclusive(f"simulator {method} {path} -> {status} {raw[:200]!r}")
     return json.loads(raw) if raw else None
+
+
+def sink(method, path, body=None):
+    """Webhook sink control call. Non-2xx raises Inconclusive."""
+    status, _, raw = http(method, f"{URLS['sink']}/api/v1{path}", body)
+    if not 200 <= status < 300:
+        raise Inconclusive(f"sink {method} {path} -> {status} {raw[:200]!r}")
+    return json.loads(raw) if raw else None
+
+
+def api(method, path, body=None):
+    """(status, parsed json or None) from the api; connection problems raise Inconclusive."""
+    status, _, raw = http(method, f"{URLS['api']}/api/v1{path}", body)
+    try:
+        return status, (json.loads(raw) if raw else None)
+    except ValueError:
+        return status, None
+
+
+def db_now():
+    return db_query("SELECT now()")[0][0]
 
 
 def get_json(url):

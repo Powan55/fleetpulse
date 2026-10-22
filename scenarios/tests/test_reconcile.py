@@ -8,6 +8,7 @@ import reconcile  # noqa: E402
 import run  # noqa: E402
 
 import time
+from datetime import datetime, timezone
 
 EPOCH = int(time.time() * 1000) - 120_000
 DEVS = [f"dev-{i:04d}" for i in range(1, 6)]
@@ -34,6 +35,14 @@ class Stack:
         return {}
 
     def query(self, sql, params=None):
+        if sql.startswith("SELECT now()"):
+            return [(datetime.now(timezone.utc),)]
+        if "FROM outbox WHERE status = 'PENDING'" in sql:
+            return [(0,)]
+        if "pg_indexes" in sql:
+            return [(1,)]
+        if "FROM alert" in sql:
+            return []
         if "FROM v_reconciliation" in sql:
             return [(d,) + v for d, v in self.db.items()]
         if "FROM device" in sql and "last_epoch" in sql:
@@ -48,6 +57,7 @@ class Stack:
 
     def install(self):
         reconcile.sim = self.sim
+        reconcile.sink = lambda *a, **k: {}
         reconcile.db_query = self.query
         reconcile.topic.group_lag = lambda *a, **k: {0: 0}
         reconcile.topic.dlq = lambda since=0: self.dlq

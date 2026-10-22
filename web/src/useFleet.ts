@@ -1,23 +1,26 @@
-import { useEffect, useState } from 'react';
-import { STREAM_URL, fetchDevices, fetchSummary } from './api';
-import { applyDevices, fromSnapshot, newerSummary, type DeviceMap } from './store';
-import type { Device, Summary } from './types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { STREAM_URL, fetchAlerts, fetchDevices, fetchSummary } from './api';
+import { alertsFromSnapshot, applyAlerts, applyDevices, fromSnapshot, newerSummary, type AlertMap, type DeviceMap } from './store';
+import type { Alert, Device, Summary } from './types';
 
 type Kind = 'snapshot' | 'batch';
 export type Conn = 'connecting' | 'connected' | 'disconnected';
 export interface Fleet {
   devices: DeviceMap;
   summary: Summary | null;
+  alerts: AlertMap;
   conn: Conn;
   ready: boolean;
   mark: Kind | null;
 }
 
 const RETRY_MS = 2000;
-const initial: Fleet = { devices: new Map(), summary: null, conn: 'connecting', ready: false, mark: null };
+const initial: Fleet = { devices: new Map(), summary: null, alerts: new Map(), conn: 'connecting', ready: false, mark: null };
 
-export function useFleet(): Fleet {
+export function useFleet(): Fleet & { putAlert: (a: Alert) => void } {
   const [fleet, setFleet] = useState<Fleet>(initial);
+  const put = useRef<(a: Alert) => void>(() => {});
+  const putAlert = useCallback((a: Alert) => put.current(a), []);
   const { mark } = fleet;
 
   useEffect(() => {
@@ -61,6 +64,9 @@ export function useFleet(): Fleet {
       if (name === 'devices') {
         cur = { ...cur, devices: applyDevices(cur.devices, (data as { items: Device[] }).items) };
         touch('batch');
+      } else if (name === 'alerts') {
+        cur = { ...cur, alerts: applyAlerts(cur.alerts, (data as { items: Alert[] }).items) };
+        touch('batch');
       } else if (name === 'fleet.summary') {
         cur = { ...cur, summary: newerSummary(cur.summary, data as Summary) };
         touch('batch');
@@ -71,12 +77,13 @@ export function useFleet(): Fleet {
       live = false;
       buffer = [];
       try {
-        const [page, summary] = await Promise.all([fetchDevices(), fetchSummary()]);
+        const [page, summary, alerts] = await Promise.all([fetchDevices(), fetchSummary(), fetchAlerts()]);
         if (mine !== gen) return;
         cur = {
           ...cur,
           devices: fromSnapshot(cur.devices, page.items),
           summary,
+          alerts: alertsFromSnapshot(cur.alerts, alerts.items),
           conn: 'connected',
           ready: true,
         };
@@ -108,6 +115,7 @@ export function useFleet(): Fleet {
         void snapshot(mine);
       });
       on('devices');
+      on('alerts');
       on('fleet.summary');
       src.onopen = () => {
         if (mine === gen && !live) setConn('connecting');
@@ -127,6 +135,10 @@ export function useFleet(): Fleet {
       timer = window.setTimeout(connect, RETRY_MS);
     };
 
+    put.current = (a) => {
+      cur = { ...cur, alerts: applyAlerts(cur.alerts, [a]) };
+      touch('batch');
+    };
     connect();
     return () => {
       gen++;
@@ -136,5 +148,5 @@ export function useFleet(): Fleet {
     };
   }, []);
 
-  return fleet;
+  return { ...fleet, putAlert };
 }

@@ -1,4 +1,4 @@
-import type { Device, Summary } from './types';
+import type { Alert, Device, Summary } from './types';
 
 export type DeviceMap = Map<string, Device>;
 
@@ -31,3 +31,27 @@ export function fromSnapshot(map: DeviceMap, items: Device[]): DeviceMap {
     }),
   );
 }
+
+export type AlertMap = Map<number, Alert>;
+
+export function applyAlerts(map: AlertMap, items: Alert[]): AlertMap {
+  let next: AlertMap | null = null;
+  for (const a of items) {
+    const known = (next ?? map).get(a.alertId);
+    if (known && known.version >= a.version) continue;
+    next ??= new Map(map);
+    next.set(a.alertId, a);
+  }
+  return next ?? map;
+}
+
+export function alertsFromSnapshot(map: AlertMap, items: Alert[]): AlertMap {
+  return new Map(
+    items.map((a) => {
+      const known = map.get(a.alertId);
+      return [a.alertId, known && known.version === a.version ? known : a];
+    }),
+  );
+}
+
+export const sortedAlerts = (map: AlertMap): Alert[] => [...map.values()].sort((a, b) => b.alertId - a.alertId);

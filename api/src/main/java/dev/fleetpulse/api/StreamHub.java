@@ -39,16 +39,19 @@ public class StreamHub {
     }
 
     private final DeviceRepository devices;
+    private final AlertRepository alerts;
     private final int retryMs;
     private final int maxClients;
     private final String instance = UUID.randomUUID().toString();
     private final Set<Client> clients = ConcurrentHashMap.newKeySet();
     private final Set<String> pending = ConcurrentHashMap.newKeySet();
+    private final Set<Long> pendingAlerts = ConcurrentHashMap.newKeySet();
     private final ExecutorService writers = Executors.newVirtualThreadPerTaskExecutor();
 
-    public StreamHub(DeviceRepository devices, @Value("${fp.sse.retry}") int retryMs,
+    public StreamHub(DeviceRepository devices, AlertRepository alerts, @Value("${fp.sse.retry}") int retryMs,
                      @Value("${fp.sse.max-clients}") int maxClients) {
         this.devices = devices;
+        this.alerts = alerts;
         this.retryMs = retryMs;
         this.maxClients = maxClients;
     }
@@ -75,27 +78,44 @@ public class StreamHub {
         pending.addAll(ids);
     }
 
+    public void alertChanged(Collection<Long> ids) {
+        pendingAlerts.addAll(ids);
+    }
+
     public void resync() {
         broadcast(SseEmitter.event().name("resync").data(new Resync("listener_reconnected"), MediaType.APPLICATION_JSON).build());
     }
 
-    @Scheduled(fixedDelayString = "${fp.sse.flush-interval}")
-    void flush() {
-        Set<String> ids = new HashSet<>();
-        for (var it = pending.iterator(); it.hasNext() && ids.size() < MAX_BATCH; ) {
-            ids.add(it.next());
+    private static <T> Set<T> drain(Set<T> src) {
+        Set<T> out = new HashSet<>();
+        for (var it = src.iterator(); it.hasNext() && out.size() < MAX_BATCH; ) {
+            out.add(it.next());
             it.remove();
         }
-        if (ids.isEmpty() || clients.isEmpty()) return;
+        return out;
+    }
+
+    @Scheduled(fixedDelayString = "${fp.sse.flush-interval}")
+    void flush() {
+        Set<String> ids = drain(pending);
+        Set<Long> aids = drain(pendingAlerts);
+        if ((ids.isEmpty() && aids.isEmpty()) || clients.isEmpty()) return;
         try {
-            var items = devices.findByIds(ids);
-            if (items.isEmpty()) return;
             Set<DataWithMediaType> msg = new java.util.LinkedHashSet<>();
-            msg.addAll(SseEmitter.event().name("devices").data(new Items<>(items), MediaType.APPLICATION_JSON).build());
-            msg.addAll(SseEmitter.event().name("fleet.summary").data(devices.summary(), MediaType.APPLICATION_JSON).build());
+            var items = ids.isEmpty() ? List.<Dto.DeviceSummary>of() : devices.findByIds(ids);
+            if (!items.isEmpty()) {
+                msg.addAll(SseEmitter.event().name("devices").data(new Items<>(items), MediaType.APPLICATION_JSON).build());
+                msg.addAll(SseEmitter.event().name("fleet.summary").data(devices.summary(), MediaType.APPLICATION_JSON).build());
+            }
+            var changed = aids.isEmpty() ? List.<Dto.Alert>of() : alerts.findByIds(aids);
+            if (!changed.isEmpty()) {
+                msg.addAll(SseEmitter.event().name("alerts").data(new Items<>(changed), MediaType.APPLICATION_JSON).build());
+            }
+            if (msg.isEmpty()) return;
             broadcast(msg);
         } catch (RuntimeException e) {
             pending.addAll(ids);
+            pendingAlerts.addAll(aids);
             log.warn("sse flush failed, will retry: {}", e.toString());
         }
     }

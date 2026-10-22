@@ -25,7 +25,7 @@ final class Counters {
     final AtomicLong malformedInjected = new AtomicLong();
     final AtomicLong buffered = new AtomicLong();
 
-    Map<String, Object> view(long accepted) {
+    Map<String, Object> view(long accepted, int disconnected) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("generated", generated.get());
         m.put("accepted", accepted);
@@ -38,7 +38,7 @@ final class Counters {
         m.put("bufferOverflow", bufferOverflow.get());
         m.put("sendFailed", sendFailed.get());
         m.put("malformedInjected", malformedInjected.get());
-        m.put("disconnectedDevices", 0);
+        m.put("disconnectedDevices", disconnected);
         m.put("bufferedEvents", buffered.get());
         return m;
     }

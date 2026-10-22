@@ -50,9 +50,36 @@ export interface DeviceDetail extends Device {
   lastSeq: number;
   recentTelemetry: TelemetryPoint[];
   stateHistory: StateTransition[];
-  alerts: unknown[];
+  alerts: Alert[];
 }
 
 export type DetailResult =
   | { ok: true; detail: DeviceDetail }
   | { ok: false; status: number; message: string };
+
+export type AlertStatus = 'OPEN' | 'ACKED' | 'RESOLVED';
+
+export interface Alert {
+  alertId: number;
+  deviceId: string;
+  ruleId: string;
+  status: AlertStatus;
+  version: number;
+  backfilled: boolean;
+  openedAt: string;
+  ackedAt?: string | null;
+  resolvedAt?: string | null;
+  resolvedBy?: 'auto' | 'operator' | null;
+  updatedAt: string;
+}
+
+export interface AlertPage {
+  items: Alert[];
+  page: number;
+  size: number;
+  totalItems: number;
+}
+
+export type ActionResult =
+  | { ok: true; alert: Alert }
+  | { ok: false; status: number; message: string; alert?: Alert };

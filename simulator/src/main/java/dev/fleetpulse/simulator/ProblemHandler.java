@@ -43,7 +43,7 @@ class ProblemHandler extends ResponseEntityExceptionHandler {
             String code = switch (status.value()) {
                 case 400 -> "VALIDATION_FAILED";
                 case 404 -> "NOT_FOUND";
-                case 405, 411, 413 -> "VALIDATION_FAILED";
+                case 405, 409, 411, 413 -> "VALIDATION_FAILED";
                 case 415 -> "UNSUPPORTED_MEDIA_TYPE";
                 default -> "INTERNAL";
             };

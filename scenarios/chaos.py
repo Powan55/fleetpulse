@@ -2,6 +2,7 @@
 import os
 import time
 
+import m3
 from lib import CLEANUP, Checks, Inconclusive, db_query, sim, wait_flowing
 from reconcile import LagSampler, Monitor, event_id, reconcile
 
@@ -29,6 +30,7 @@ class Window:
         if not ok:
             raise Inconclusive(f"fleet not flowing at start: {detail}")
         c.note(f"baseline: {detail}")
+        m3.settle()
         self.since = now_ms()
         led = sim("GET", "/ledger")
         self.seed, self.epoch = led["seed"], led["epoch"]
@@ -42,8 +44,11 @@ class Window:
     def abort(self):
         for t in (self.mon, self.lag):
             t.finish()
-        sim("PUT", "/chaos", {})
-        sim("PUT", "/generation", {"paused": False})
+        for fn in (m3.reset_controls, lambda: sim("PUT", "/generation", {"paused": False})):
+            try:
+                fn()
+            except Inconclusive as e:
+                print(f"  note  cleanup step failed: {e}")
 
     def apply(self, chaos, secs):
         sim("PUT", "/chaos", chaos)
@@ -53,11 +58,11 @@ class Window:
     def delta(self, key):
         return self.k1[key] - self.k0[key]
 
-    def finish(self, c: Checks, lag_check="nfr12"):
+    def finish(self, c: Checks, lag_check="nfr12", t_cut=None, allow_dead=False):
         if sim("GET", "/ledger/devices/dev-0001")["epoch"] != self.epoch:
             raise Inconclusive("simulator restarted during the scenario (epoch changed)")
         try:
-            reconcile(c, self.since, mon=self.mon, base=self.base)
+            self.result = reconcile(c, self.since, mon=self.mon, base=self.base, t_cut=t_cut, allow_dead=allow_dead)
         finally:
             self.mon.finish()
             self.lag.finish()

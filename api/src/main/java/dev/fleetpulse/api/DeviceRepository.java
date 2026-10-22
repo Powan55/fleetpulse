@@ -29,8 +29,11 @@ public class DeviceRepository {
 
     private final JdbcClient db;
     private final Duration telemetryWindow;
+    private final AlertRepository alerts;
 
-    public DeviceRepository(DataSource ds, @Value("${fp.retention.telemetry}") Duration telemetryWindow) {
+    public DeviceRepository(DataSource ds, @Value("${fp.retention.telemetry}") Duration telemetryWindow,
+                            AlertRepository alerts) {
+        this.alerts = alerts;
         this.db = JdbcClient.create(ds);
         this.telemetryWindow = telemetryWindow;
     }
@@ -65,7 +68,7 @@ public class DeviceRepository {
                 .query((rs, i) -> new DeviceDetail(rs.getString("device_id"), rs.getString("state"), rs.getLong("state_version"),
                         instant(rs, "state_changed_at"), instant(rs, "last_seen_at"), instant(rs, "last_event_time"),
                         rs.getLong("last_epoch"), rs.getLong("last_seq"), telemetry(id, telemetryLimit),
-                        history(id, historyLimit), List.of()))
+                        history(id, historyLimit), alerts.forDevice(id, 50)))
                 .optional();
     }
 

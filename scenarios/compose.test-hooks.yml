@@ -1,0 +1,4 @@
+services:
+  processor:
+    environment:
+      FP_TEST_HOOKS_ENABLED: "true"

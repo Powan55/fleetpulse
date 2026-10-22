@@ -29,8 +29,7 @@ public class ChangeListener {
     private static final int MAX_IDS = 200;
     private static final JsonMapper JSON = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build();
 
-    // devices == null: dropped. Alert notifications parse fine but M1 has no alert stream.
-    record Parsed(List<String> devices) {}
+    record Parsed(List<String> devices, List<Long> alerts) {}
 
     private final StreamHub hub;
     private final String url;
@@ -65,12 +64,13 @@ public class ChangeListener {
             if (!root.isObject() || root.size() != 2 || ids == null || !ids.isArray() || ids.size() == 0 || ids.size() > MAX_IDS) return null;
             String t = root.path("t").asString("");
             List<String> out = new ArrayList<>();
+            List<Long> aout = new ArrayList<>();
             for (JsonNode id : ids) {
                 if (t.equals("d") && id.isString() && DEVICE_ID.matcher(id.asString()).matches()) out.add(id.asString());
-                else if (t.equals("a") && id.isIntegralNumber() && id.canConvertToLong() && id.asLong() >= 1) continue;
+                else if (t.equals("a") && id.isIntegralNumber() && id.canConvertToLong() && id.asLong() >= 1) aout.add(id.asLong());
                 else return null;
             }
-            return new Parsed(out);
+            return new Parsed(out, aout);
         } catch (RuntimeException e) {
             return null;
         }
@@ -109,8 +109,9 @@ public class ChangeListener {
                         if (p == null) {
                             rejected.increment();
                             log.warn("dropped notification, {} chars", n.getParameter() == null ? 0 : n.getParameter().length());
-                        } else if (!p.devices().isEmpty()) {
-                            hub.deviceChanged(p.devices());
+                        } else {
+                            if (!p.devices().isEmpty()) hub.deviceChanged(p.devices());
+                            if (!p.alerts().isEmpty()) hub.alertChanged(p.alerts());
                         }
                     }
                 }
