@@ -23,8 +23,17 @@ const summary = () => {
   for (const d of devices.values()) byState[d.state]++;
   return { total: devices.size, byState, asOf: now() };
 };
+const alerts = new Map();
+const mk = (alertId, deviceId, ruleId, backfilled = false) =>
+  alerts.set(alertId, { alertId, deviceId, ruleId, status: 'OPEN', version: 1, backfilled, openedAt: now(), ackedAt: null, resolvedAt: null, resolvedBy: null, updatedAt: now() });
+if (!grow) {
+  mk(1, 'dev-0001', 'temperature_high');
+  mk(2, 'dev-0001', 'device_failed', true);
+  mk(3, 'dev-0002', 'battery_low');
+}
 const clients = new Set();
 let changed = new Map();
+let changedAlerts = new Map();
 
 setInterval(() => {
   for (let k = 0; k < 20; k++) {
@@ -43,6 +52,11 @@ setInterval(() => {
 }, 1000);
 
 setInterval(() => {
+  if (changedAlerts.size) {
+    const items = [...changedAlerts.values()];
+    changedAlerts = new Map();
+    for (const res of clients) res.write(`event: alerts\ndata: ${JSON.stringify({ items })}\n\n`);
+  }
   if (!changed.size) return;
   const items = [...changed.values()];
   changed = new Map();
@@ -60,6 +74,31 @@ http
       res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
       res.end(body);
     };
+    const problem = (status, code, title, extra = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/problem+json' });
+      res.end(JSON.stringify({ type: `urn:fleetpulse:problem:${code.toLowerCase().replaceAll('_', '-')}`, title, status, code, ...extra }));
+    };
+    if (url.pathname === '/api/v1/alerts') {
+      const want = (url.searchParams.get('status') ?? 'OPEN,ACKED,RESOLVED').split(',');
+      const items = [...alerts.values()].filter((a) => want.includes(a.status)).sort((a, b) => b.alertId - a.alertId);
+      return json({ items, page: 0, size: 200, totalItems: items.length });
+    }
+    const am = /^\/api\/v1\/alerts\/(\d+)\/(ack|resolve)$/.exec(url.pathname);
+    if (am && req.method === 'POST') {
+      if (!(req.headers['content-type'] ?? '').startsWith('application/json')) return problem(415, 'UNSUPPORTED_MEDIA_TYPE', 'JSON body required');
+      const a = alerts.get(Number(am[1]));
+      if (!a) return problem(404, 'NOT_FOUND', 'Alert not found');
+      if (a.status === 'RESOLVED') return problem(409, 'ALERT_RESOLVED', 'Alert already resolved', { alert: a });
+      const noop = am[2] === 'ack' && a.status === 'ACKED';
+      if (am[2] === 'ack' && a.status === 'OPEN') Object.assign(a, { status: 'ACKED', ackedAt: now() });
+      if (am[2] === 'resolve') Object.assign(a, { status: 'RESOLVED', resolvedAt: now(), resolvedBy: 'operator' });
+      if (!noop) {
+        a.version++;
+        a.updatedAt = now();
+        changedAlerts.set(a.alertId, { ...a });
+      }
+      return json(a);
+    }
     if (url.pathname === '/api/v1/fleet/summary') return json(summary());
     if (url.pathname === '/api/v1/devices') {
       const items = [...devices.values()].sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
@@ -67,10 +106,6 @@ http
     }
     const m = /^\/api\/v1\/devices\/([^/]+)$/.exec(url.pathname);
     if (m) {
-      const problem = (status, code, title) => {
-        res.writeHead(status, { 'Content-Type': 'application/problem+json' });
-        res.end(JSON.stringify({ type: `urn:fleetpulse:problem:${code.toLowerCase().replace('_', '-')}`, title, status, code }));
-      };
       if (!/^dev-[0-9]{4,6}$/.test(m[1])) return problem(400, 'VALIDATION_FAILED', 'Invalid deviceId');
       const d = devices.get(m[1]);
       if (!d) return problem(404, 'NOT_FOUND', 'Device not found');
@@ -82,7 +117,7 @@ http
       const stateHistory = Array.from({ length: Math.min(d.stateVersion - 1, 50) }, (_, i) => ({
         id: 100 - i, fromState: 'HEALTHY', toState: d.state, cause: 'telemetry', eventId: null, eventTime: null, occurredAt: now(), replay: false,
       }));
-      return json({ ...d, lastEventTime: now(), lastEpoch: 1, lastSeq: 1000, recentTelemetry, stateHistory, alerts: [] });
+      return json({ ...d, lastEventTime: now(), lastEpoch: 1, lastSeq: 1000, recentTelemetry, stateHistory, alerts: [...alerts.values()].filter((a) => a.deviceId === d.deviceId).sort((a, b) => b.alertId - a.alertId) });
     }
     if (url.pathname === '/api/v1/stream') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });

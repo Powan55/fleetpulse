@@ -1,7 +1,8 @@
 import { memo, useEffect, useMemo, useState } from 'react';
+import { AlertsPage } from './Alerts';
 import { Detail } from './Detail';
 import { useFleet, type Conn } from './useFleet';
-import { sortedDevices } from './store';
+import { sortedAlerts, sortedDevices } from './store';
 import { STATES, type Device, type DeviceState } from './types';
 
 const CONN_TEXT: Record<Conn, string> = {
@@ -21,14 +22,19 @@ export const Tile = memo(function Tile({ d }: { d: Device }) {
   );
 });
 
+const onAlertsRoute = () => typeof location !== 'undefined' && location.hash === '#/alerts';
 const selectedId = () => /^#\/devices\/([^/]+)$/.exec(location.hash)?.[1] ?? null;
 
 export function App() {
-  const { devices, summary, conn, ready } = useFleet();
+  const { devices, summary, alerts, conn, ready, putAlert } = useFleet();
+  const [route, setRoute] = useState(onAlertsRoute());
   const [filter, setFilter] = useState<DeviceState | ''>('');
   const [selected, setSelected] = useState<string | null>(typeof location === 'undefined' ? null : selectedId());
   useEffect(() => {
-    const on = () => setSelected(selectedId());
+    const on = () => {
+      setSelected(selectedId());
+      setRoute(onAlertsRoute());
+    };
     window.addEventListener('hashchange', on);
     return () => window.removeEventListener('hashchange', on);
   }, []);
@@ -42,6 +48,14 @@ export function App() {
         <p role="status" className={`conn c-${conn}`} data-testid="connection-indicator" data-state={conn}>
           {CONN_TEXT[conn]}
         </p>
+        <nav aria-label="Main">
+          <a href="#/" data-testid="nav-fleet">
+            Fleet
+          </a>{' '}
+          <a href="#/alerts" data-testid="nav-alerts">
+            Alerts ({[...alerts.values()].filter((a) => a.status !== 'RESOLVED').length})
+          </a>
+        </nav>
       </header>
 
       <section aria-label="Fleet summary" className="summary">
@@ -55,8 +69,15 @@ export function App() {
         ))}
       </section>
 
-      {selected ? (
-        <Detail id={decodeURIComponent(selected)} live={devices.get(decodeURIComponent(selected))} />
+      {route ? (
+        <AlertsPage alerts={sortedAlerts(alerts)} ready={ready} onChange={putAlert} />
+      ) : selected ? (
+        <Detail
+          id={decodeURIComponent(selected)}
+          live={devices.get(decodeURIComponent(selected))}
+          alerts={alerts}
+          onAlert={putAlert}
+        />
       ) : (
         <>
           <label className="filter">

@@ -1,20 +1,67 @@
 import { useEffect, useState } from 'react';
 import { fetchDevice } from './api';
-import type { DetailResult, Device } from './types';
+import { AlertTable } from './Alerts';
+import type { Alert, DetailResult, Device, TelemetryPoint } from './types';
 
 const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : '-');
+
+const W = 600;
+const H = 120;
+function line(vals: number[]) {
+  const lo = Math.min(...vals);
+  const span = Math.max(...vals) - lo || 1;
+  return vals.map((v, i) => `${(i / Math.max(vals.length - 1, 1)) * W},${H - ((v - lo) / span) * H}`).join(' ');
+}
+const range = (v: number[]) => `${Math.min(...v)} to ${Math.max(...v)}`;
+
+export function Chart({ points }: { points: TelemetryPoint[] }) {
+  const p = [...points].reverse();
+  const temp = p.map((t) => t.temperatureC);
+  const batt = p.map((t) => t.batteryPct);
+  return (
+    <figure className="chart" data-testid="telemetry-chart">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-label={`Temperature and battery, last ${p.length} readings, oldest left`}
+        preserveAspectRatio="none"
+      >
+        <polyline points={line(temp)} className="line-temp" />
+        <polyline points={line(batt)} className="line-batt" />
+      </svg>
+      <figcaption>
+        <span className="line-temp-key">Temperature {range(temp)} C</span>
+        {' | '}
+        <span className="line-batt-key">Battery {range(batt)} %</span>
+      </figcaption>
+    </figure>
+  );
+}
 
 export function DetailView({
   id,
   live,
   result,
   onRetry,
+  alerts,
+  onAlert = () => {},
 }: {
   id: string;
   live?: Device;
   result: DetailResult | null;
   onRetry: () => void;
+  alerts?: Map<number, Alert>;
+  onAlert?: (a: Alert) => void;
 }) {
+  const merged: Alert[] = result?.ok
+    ? [
+        ...new Map(
+          [...result.detail.alerts, ...[...(alerts?.values() ?? [])].filter((a) => a.deviceId === id)]
+            .sort((x, y) => x.version - y.version)
+            .map((a) => [a.alertId, a] as const),
+        ).values(),
+      ].sort((x, y) => y.alertId - x.alertId)
+    : [];
   return (
     <section aria-label={`Device ${id}`} data-testid="device-detail" data-device-id={id}>
       <p>
@@ -53,6 +100,20 @@ export function DetailView({
             <dd data-testid="detail-last-seq">{result.detail.lastSeq}</dd>
           </dl>
 
+          <h3>Alerts</h3>
+          {merged.length === 0 ? (
+            <p data-testid="detail-alerts-empty">No alerts for this device.</p>
+          ) : (
+            <AlertTable alerts={merged} onChange={onAlert} showDevice={false} testid="detail-alerts" />
+          )}
+
+          <h3>Telemetry chart</h3>
+          {result.detail.recentTelemetry.length === 0 ? (
+            <p data-testid="chart-empty">No telemetry to chart.</p>
+          ) : (
+            <Chart points={result.detail.recentTelemetry} />
+          )}
+
           <h3>Recent telemetry</h3>
           {result.detail.recentTelemetry.length === 0 ? (
             <p data-testid="telemetry-empty">No telemetry in the retention window.</p>
@@ -87,7 +148,7 @@ export function DetailView({
             </div>
           )}
 
-          <h3>State history</h3>
+          <h3>State timeline</h3>
           {result.detail.stateHistory.length === 0 ? (
             <p data-testid="history-empty">No state changes recorded.</p>
           ) : (
@@ -113,7 +174,17 @@ interface Loaded {
   result: DetailResult;
 }
 
-export function Detail({ id, live }: { id: string; live?: Device }) {
+export function Detail({
+  id,
+  live,
+  alerts,
+  onAlert,
+}: {
+  id: string;
+  live?: Device;
+  alerts: Map<number, Alert>;
+  onAlert: (a: Alert) => void;
+}) {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [retry, setRetry] = useState(0);
   const version = live?.stateVersion;
@@ -129,5 +200,14 @@ export function Detail({ id, live }: { id: string; live?: Device }) {
   }, [id, version, retry]);
 
   const result = loaded && loaded.id === id ? loaded.result : null;
-  return <DetailView id={id} live={live} result={result} onRetry={() => setRetry((n) => n + 1)} />;
+  return (
+    <DetailView
+      id={id}
+      live={live}
+      result={result}
+      onRetry={() => setRetry((n) => n + 1)}
+      alerts={alerts}
+      onAlert={onAlert}
+    />
+  );
 }
